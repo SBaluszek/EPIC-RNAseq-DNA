@@ -1,0 +1,4351 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+rm(list = ls())
+gc()
+library(tximport)
+library(readr)
+library(stringr)
+library(DESeq2)
+library(ComplexHeatmap)
+library(mclust)
+library(survival)
+
+wd = getwd()
+
+dropNA = function(x){
+  x = x[!is.na(x)]
+  return(x)
+}
+
+flip <- function(x){
+  x = as.matrix(x)
+  y = t(apply(x, 2, rev))
+  rownames(y)=colnames(x)
+  colnames(y)=rev(rownames(x))
+  return (y)
+}
+```
+
+
+
+```{r}
+s = c("11_18", "16_20", "18_16", "19_19", "20_17", "24_18", "26_15", "26_16", "28_20", "31_14", "31_20", "32_14", "35_17", "37_19", "38_17", "39_18", "40_18", "45_17",  "50_15", "50_19", "53_18", "54_15", "55_19",  "62_15", "67_11", "68_18",  "74_19", "81_15", "92_15", "5_16","4_19","6_16","7_19", "9_20", "NP4", "NP7", "NP8", "NP9")
+
+s
+```
+
+```{r}
+paste0(sapply(s, function(el){
+  paste0("kallisto quant -i output/hg19_ki.idx -o output/", el, " -b 40 -t 5 --bias --fusion dt/", el, "_1.fastq.gz  dt/", el, "_2.fastq.gz; pizzly -k 31 --gtf output/Homo_sapiens.GRCh37.87.gtf.gz --fasta output/Homo_sapiens.GRCh37.cdna.all.fa.gz --output output/", el, "/pizzly output/", el, "/fusion.txt")
+}), collapse = "; ")
+```
+
+```{r}
+library(biomaRt)
+#mart <- useMart(biomart = "ENSEMBL_MART_ENSEMBL", host="grch37.ensembl.org")
+ensembl = useEnsembl(biomart = "ensembl", dataset = "hsapiens_gene_ensembl", GRCh = 37, mirror = "www")
+trl = getBM(attributes=c("ensembl_gene_id", "ensembl_transcript_id", "hgnc_symbol", "entrezgene_id" ,"gene_biotype", "start_position", "end_position", "chromosome_name", "strand"), mart= ensembl)
+
+trl$chromosome_name = factor(trl$chromosome_name, levels = unique(c(as.character(1:22), "X", "Y", trl$chromosome_name)))
+trl = trl[order(trl$chromosome_name),]
+trl
+```
+```{r}
+unique(trl$gene_biotype)
+```
+
+
+```{r}
+'files = sapply(s, function(el){
+  paste0("D:/Files/Molecular_data/chordoma_RNAseq/output/", el, "/abundance.h5")
+})
+txi.kallisto <- tximport(files, type = "kallisto", txOut = T, txIn = T)
+
+tr.key = data.frame(rn = rownames(txi.kallisto$counts))
+
+tr.key = cbind(tr.key, trl[match(sapply(strsplit(tr.key$rn, "\\."), function(el){el[1]}), trl$ensembl_transcript_id),])
+
+rownames(tr.key) = tr.key$rn
+
+tr.key'
+
+#setwd(paste0(wd, "/dt"))
+#save(tr.key, file = "transcripts_key.Rdata")
+
+wd = getwd()
+setwd(paste0(wd, "/dt"))
+load(file = "transcripts_key.Rdata")
+```
+
+```{r}
+tr.key
+```
+
+
+```{r}
+tr.key[tr.key$gene_biotype %in% c("protein_coding", unique(tr.key$gene_biotype)[grepl("_gene", unique(tr.key$gene_biotype))]),]
+```
+
+
+
+
+```{r}
+files = sapply(s, function(el){
+  paste0("D:/Files/Molecular_data/chordoma_RNAseq/output/", el, "/abundance.h5")
+})
+txi.kallisto <- tximport(files, type = "kallisto", txOut = F, txIn = T, tx2gene = tr.key[tr.key$gene_biotype %in% c("protein_coding", unique(tr.key$gene_biotype)[grepl("_gene", unique(tr.key$gene_biotype))]),c("rn", "ensembl_gene_id")])
+```
+
+
+```{r}
+cd = data.frame(source = ifelse(grepl("NP", colnames(txi.kallisto$counts)), "NP", "Ch"),
+                sample = colnames(txi.kallisto$counts))
+
+setwd(paste0(wd, "/dt"))
+x = xlsx::read.xlsx("probki_lista_zbiorcza.xlsx",1)
+
+cd$sex = ifelse(x$plec[match(cd$sample, x$NA.)] == "M", "male", "female")
+cd$age = as.numeric(x$wiek[match(cd$sample, x$NA.)])
+
+setwd(gsub("RNAseq", "EPIC", paste0(wd, "/res")))
+x = read.csv("spl_clust2.csv")
+
+cd$methylation_cluster = x[match(cd$sample, gsub("/", "_", x$Sample_Name)),"type"]
+
+cd$methylation_cluster[cd$source == "NP"] = "nucleus_pulposus"
+
+cd$source[cd$sample %in% c("MUG_CC1", "UM_Chor1")] = "CL"
+
+cd$source = factor(as.character(cd$source), levels = c("NP", "Ch"))
+
+cd$methylation_cluster[cd$source == "CL"] = "cell_line"
+
+cd$ly = ifelse(cd$sample %in% c("28_12", "81_15", "92_15", "32_14", "31_14", "26_15", "35_17", "28_20"), "high", "low")
+cd$idh = ifelse(cd$sample %in% c("16_20", "67_11"), "mut", "wt")
+cd$cdkn = ifelse(cd$sample %in% c("5_16", "31_20", "4_19", "24_18", "50_19", "53_18", "9_20", "20_17", "50_15"), "loh", "wt")
+
+
+```
+
+```{r}
+
+
+```
+
+```{r}
+cd$surv = Surv(time = x[match(gsub("_", "/", cd$sample), x$Sample_Name),"Days"], event = ifelse(x[match(gsub("_", "/", cd$sample), x$Sample_Name),"Alive"] == "yes", 0,1))
+cd
+```
+
+
+```{r}
+#setwd("D:\\Files\\Molecular_data\\chordoma_RNAseq\\counts")
+#load(file = "Rsubread_counts.Rdata")
+```
+
+
+
+
+
+
+
+```{r}
+'f = function(el){
+  paste0(s[sapply(s, grepl, x = el)], "_", ifelse(grepl("1.fastq.gz", el), "1.fastq.gz", "2.fastq.gz"))
+}
+
+setwd("D:\\Files\\Molecular_data\\chordoma_RNAseq\\dt")
+x = list.files()
+x = setNames(x, x)
+
+x = sapply(x, f)
+x = x[sapply(x, length) == 1]
+x = unlist(x)
+
+
+for(el in names(x)){
+  file.rename(from = el, to = x[el])
+}'
+```
+
+
+
+
+
+
+
+
+```{r}
+'counts = fc$counts
+colnames(counts) = gsub("38.17", "38_17", gsub(".bam", "", colnames(counts)))
+
+dim(counts)
+counts = counts[!is.na(trl$entrezgene_id[match(rownames(counts), trl$entrezgene_id)]),]
+dim(counts)
+counts = counts[trl[match(rownames(counts), trl$entrezgene_id),"gene_biotype"] %in% c("protein_coding", "IG_V_gene", "TR_C_gene"),]
+dim(counts)'
+```
+
+
+
+
+```{r}
+rownames(cd) = cd$sample
+cd = cd[colnames(txi.kallisto$counts),]
+cd
+```
+
+
+
+```{r}
+dds <- DESeqDataSetFromTximport(txi.kallisto, cd, ~source)
+dds <- dds[rowSums(counts(dds) > 4)>10,]
+
+dds <- DESeq(dds)
+res <- results(dds)
+res = as.data.frame(res)
+
+res$hgnc = trl[match(rownames(res), trl$ensembl_gene_id),"hgnc_symbol"]
+
+res[order(res$pvalue),]
+```
+
+
+```{r}
+trl[trl$ensembl_gene_id == "ENSG00000215033",]
+```
+
+
+
+```{r}
+sum(dropNA(res$padj)<0.01)
+```
+
+```{r}
+log_c <- assay(vst(dds, blind=FALSE))
+
+log_c = log_c[,!colnames(log_c) %in% c("UM_Chor1",  "MUG_CC1")]
+
+log_c = log_c[order(apply(log_c[,cd[match(colnames(log_c), cd$sample),"source"] == "Ch"], 1, var) / rowSums(log_c), decreasing = T),]
+
+
+
+trl[match(rownames(log_c), trl$ensembl_gene_id),]
+```
+
+```{r}
+range(apply(log_c[,!grepl("NP", colnames(log_c))], 1, sd))
+```
+
+
+```{r}
+norm_c = flip(scale(flip(log_c)))
+norm_c =  norm_c[match(rownames(log_c), rownames(norm_c)),]
+```
+
+
+
+```{r}
+
+```
+
+
+
+
+```{r}
+coxres = sapply(rownames(norm_c), function(el){
+  x = summary(coxph(surv~gene, data = data.frame(gene = norm_c[el,], surv = cd[colnames(norm_c),"surv"])))
+  x = c(x$coefficients["gene","coef"], x$logtest["pvalue"], x$sctest["pvalue"], x$waldtest["pvalue"])
+  return(x)
+})
+
+rownames(coxres) = c("estimate", "p_log", "p_sc", "p_wald")
+
+coxres = as.data.frame(flip(coxres))
+
+coxres = coxres[order(pmin(coxres$p_wald, coxres$p_sc, coxres$p_log)),]
+
+
+```
+
+
+```{r}
+coxres$hgnc = trl[match(rownames(coxres), trl$ensembl_gene_id),"hgnc_symbol"]
+coxres
+```
+
+```{r}
+x = coxres[rownames(res),c("p_sc","estimate")]
+colnames(x) = c("pvalue_surv", "log2FoldChange_surv")
+res = cbind(res, x)
+```
+```{r}
+x = res[res$padj<0.05 & res$pvalue_surv<0.05,]
+x[order(abs(x$log2FoldChange_surv*x$log2FoldChange), decreasing = T),]
+```
+
+
+```{r}
+library(maxstat)
+```
+
+
+
+
+
+```{r}
+
+el = "ENSG00000143196"
+df = data.frame(gene = norm_c[el,], surv = cd[match(colnames(norm_c), cd$sample), "surv"])
+
+mt = maxstat.test(surv ~ gene,
+             data=df,
+             smethod="LogRank", pmethod="HL")
+mt
+
+df$two = ifelse(df$gene > mt$estimate, "high", "low")
+
+library(survminer)
+fit <- survfit(surv ~ two, data=df)
+p = ggsurvplot(fit, axes.offset = F, ylim = c(0, 1.03), break.time.by = 365, conf.int = F, xlab = "Time in days")
+
+p$plot = p$plot + theme(legend.position = "bottom") + scale_color_manual(name = "Gene expression:", values = c("orange", "blue"), breaks = c("two=high", "two=low"), labels = c("high","low"))
+
+p
+```
+
+
+
+
+```{r}
+setwd(paste0(wd, "/res"))
+save(norm_c, file = "RNA_norm.Rdata")
+```
+
+```{r}
+setwd(paste0(wd, "/res"))
+save(log_c, file = "RNA_vst.Rdata")
+```
+
+
+```{r}
+cv2 = scran::modelGeneCV2(log_c[,grepl("_", colnames(log_c))])
+```
+
+
+
+
+
+```{r}
+mod1 <- Mclust(flip(norm_c[rownames(cv2[cv2$FDR<0.01,]),]))
+mod1$classification
+```
+
+```{r}
+mod1$classification[cd$sample]
+```
+
+
+
+
+```{r}
+cd$rna_cluster = paste0("chordoma_", (LETTERS[1:5])[mod1$classification[cd$sample]])
+cd$rna_cluster[cd$source == "NP"] = "nucleus_pulposus"
+cd$rna_cluster[cd$sample %in% c("UM_Chor1",  "MUG_CC1")] = "Cell"
+
+xtabs(~rna_cluster + methylation_cluster, data = cd)
+```
+
+```{r}
+setwd(gsub("RNAseq", "maf", wd))
+mut = read.csv("mutations.csv")
+```
+
+
+
+
+```{r}
+
+```
+
+
+
+```{r}
+
+'el = "BHMG1"
+df = cd
+df$mut = factor(ifelse(tapply(mut$Hugo_Symbol, mut$Tumor_Sample_Barcode, function(em){
+  sum(em==el)
+}) > 0, "yes", "no")[gsub("_", "/", df$sample)], levels=c("no", "yes"))
+
+
+library(survminer)
+fit <- survfit(surv ~ mut, data=df)
+p = ggsurvplot(fit, axes.offset = F, ylim = c(0, 1.03), break.time.by = 365, conf.int = F, xlab = "Time in days")
+
+p$plot = p$plot + theme(legend.position = "bottom") + scale_color_manual(name = "Mutation:", values = c("orange", "blue"), breaks = c("mut=yes", "mut=no"), labels = c("yes","no")) + labs(title = el)
+
+#
+
+p'
+```
+
+
+
+```{r}
+library(ComplexHeatmap)
+```
+
+```{r}
+setwd(gsub("/RNAseq", "/EPIC/res", wd))
+load(file = "conumee_res.Rdata")
+```
+
+```{r}
+df = NULL
+
+for(el in names(conumee.res)){
+  x = conumee.res[[el]]@seg$summary
+  x$ID = el
+  df = rbind(df, x)
+}
+
+df
+```
+
+```{r}
+df$width = df$loc.end - df$loc.start
+```
+
+```{r}
+df = df[df$chrom %in% paste0("chr", 1:22),]
+```
+
+
+```{r}
+x = tapply(df$width[abs(df$seg.mean)>0.3], df$ID[abs(df$seg.mean)>0.3], sum)
+```
+```{r}
+X = tapply(df$width, df$ID, sum)
+```
+
+```{r}
+x[names(X)[!names(X) %in% names(x)]] = 0
+```
+
+```{r}
+cd$cnv = (100*x/X)[gsub("_", "/", cd$sample)]
+```
+
+```{r}
+setwd(gsub("RNAseq", "maf", wd))
+mut = read.csv("mutations.csv")
+```
+
+
+```{r}
+x = table(unlist(sapply(gsub("_", "/", colnames(norm_c)), function(el){
+  mut[grepl(el,mut$Tumor_Sample_Barcode),"Hugo_Symbol"]
+})))
+
+x[rev(order(x))]
+```
+
+```{r}
+el = "KDM6B"
+df = cd
+df$mut = factor(ifelse(tapply(mut$Hugo_Symbol, mut$Tumor_Sample_Barcode, function(em){
+  sum(em==el)
+}) > 0, "yes", "no")[gsub("_", "/", df$sample)], levels=c("no", "yes"))
+
+
+library(survminer)
+fit <- survfit(surv ~ mut, data=df)
+p = ggsurvplot(fit, axes.offset = F, ylim = c(0, 1.03), break.time.by = 365, conf.int = F, xlab = "Time in days")
+
+p$plot = p$plot + theme(legend.position = "bottom") + scale_color_manual(name = "Mutation:", values = c("orange", "blue"), breaks = c("mut=yes", "mut=no"), labels = c("yes","no")) + labs(title = el)
+
+
+p
+```
+
+
+```{r}
+df = cd
+
+x =table(mut[!duplicated(paste(mut$Hugo_Symbol, mut$Tumor_Sample_Barcode)),"Hugo_Symbol"])
+x = names(x[x>2])
+
+coxmut = sapply(x, function(el){
+  df$mut = factor(ifelse(tapply(mut$Hugo_Symbol, mut$Tumor_Sample_Barcode, function(em){
+    sum(em==el)
+  }) > 0, "yes", "no")[gsub("_", "/", df$sample)], levels=c("no", "yes"))
+  
+  x = summary(coxph(surv~mut, data = df))
+  x = c(x$coefficients["mutyes","coef"], x$logtest["pvalue"], x$sctest["pvalue"], x$waldtest["pvalue"])
+  return(x)
+})
+
+rownames(coxmut) = c("estimate", "p_log", "p_sc", "p_wald")
+
+coxmut = as.data.frame(flip(coxmut))
+
+coxmut = coxmut[order(pmin(coxmut$p_wald, coxmut$p_sc, coxmut$p_log)),]
+
+
+p.adjust(coxmut$p_sc, method = "BH")
+
+coxmut
+```
+```{r}
+'    '
+```
+
+
+
+```{r}
+cols = setNames(RColorBrewer::brewer.pal(12, "Paired")[c(2,4,6,8,10,11,12)], c(paste0("chordoma_", 1:4), "somatotropinoma", "nucleus_pulposus", "chordoma_cell_line"))
+
+ha = HeatmapAnnotation(
+    #PDE4DIP = df$PDE4DIP,
+    #CRLF2 = df$CRLF2,
+    #MUC3A = df$MUC3A,
+    `Copy number %` = cd[match(colnames(norm_c), cd$sample),]$cnv,
+    `Mutation load` = cd[match(colnames(norm_c), cd$sample),]$mut,
+    Age = cd[match(colnames(norm_c), cd$sample),]$age,
+    Sex = cd[match(colnames(norm_c), cd$sample),]$sex,
+    `Methylation cluster` = cd[match(colnames(norm_c), cd$sample),"methylation_cluster"],
+    `RNA cluster` = cd[match(colnames(norm_c), cd$sample),"rna_cluster"],
+    `Lymphocyte infiltration` = cd[match(colnames(norm_c), cd$sample),]$ly,
+    `IDH status` = ifelse(cd[match(colnames(norm_c), cd$sample),]$idh == "mut", "IDH1R132H", "normal"),
+    `CDKN2A/B` = ifelse(cd[match(colnames(norm_c), cd$sample),]$cdkn == "loh", "LOH", "normal"),
+    `MSH mutation` = ifelse(sapply(gsub("_", "/", colnames(norm_c)), function(el){
+      sum(mut[grepl(el,mut$Tumor_Sample_Barcode),"Hugo_Symbol"]=="MSH3")
+    }) > 0, "yes", "no"),
+    `KDM mutation` = sapply(gsub("_", "/", colnames(norm_c)), function(el){
+      el = mut[mut$Tumor_Sample_Barcode==el,"Hugo_Symbol"]
+      el[order(el)]
+      el = paste(el[grepl("KDM", el)], collapse = ", ")
+      if(el == ""){
+        el = "none"
+      }
+      return(el)
+    }),
+
+    col = list(`IDH status` = c("IDH1R132H" = "aquamarine4", "normal" = "white"),
+               `MSH mutation` = c("yes" = "blue", "no" = "white"),
+               `KDM mutation` = c("KDM6B" = "red", "KDM5B, KDM6B" = "red4", "KDM5A" = "pink", "KDM4D" = "salmon", "none" = "white"),
+               `CDKN2A/B` = c("LOH" = "bisque4", "normal" = "white"),
+               `Lymphocyte infiltration` = c("low" = "white", "high" = "darkslateblue"),
+               Sex = c("male" = "lightskyblue", "female" = "lightpink"),
+               `Copy number %` = circlize::colorRamp2(c(quantile(cd$cnv, na.rm = T, seq(0,1,0.125)),100), c("white", rev(viridis::rocket(8)), "black")),
+               #`Mutation load` = circlize::colorRamp2(c(0,quantile(dropNA(cd$mut))), c("white", rev(viridis::rocket(5)))),
+               Age = circlize::colorRamp2(c(0,10*(2:8),100), c("white", rev(viridis::rocket(7)), "black")),
+               `RNA cluster` = setNames(RColorBrewer::brewer.pal(5, "Set2"), c(paste0("chordoma_", toupper(letters[1:4])), "nucleus_pulposus")),
+               `Methylation cluster` = cols),
+    annotation_name_side = "left")
+
+ra = c("T", "IL11", "CD24", "CD8A")
+ra = rowAnnotation(` ` = anno_mark(at = match(rownames(res[match(ra, res$hgnc),]), rownames(cv2[cv2$FDR<0.01,])), labels = ra, side = "left"))
+
+ht = Heatmap(norm_c[rownames(cv2[cv2$FDR<0.01,]),],
+             name = "Scaled RNA\nexpression level",
+        show_row_names = F, show_row_dend = F,
+        left_annotation = ra,
+        clustering_method_rows = "ward.D", clustering_distance_rows = "manhattan",
+        clustering_method_columns = "ward.D", clustering_distance_columns = "manhattan",
+        top_annotation = ha,
+        col = circlize::colorRamp2(quantile(norm_c[rownames(cv2[cv2$FDR<0.01,]),], probs = seq(0, 1, 1/15)), c(rev(RColorBrewer::brewer.pal(8, "RdPu")), RColorBrewer::brewer.pal(8, "YlGn"))))
+
+png(filename = "ht_rna.png", width = 30, height = 30, units = "cm", res = 400)
+draw(ht, heatmap_legend_side = "right", annotation_legend_side = "right", merge_legend = T)
+dev.off()
+```
+
+
+
+```{r}
+cd$methylation_cluster = factor(as.character(cd$methylation_cluster), levels = c("nucleus_pulposus", "chordoma_3", "chordoma_2", "chordoma_1"))
+```
+
+
+
+
+
+
+
+
+
+```{r}
+cd$kdm = sapply(gsub("_", "/", cd$sample), function(el){
+      el = mut[mut$Tumor_Sample_Barcode==el,"Hugo_Symbol"]
+      el[order(el)]
+      el = paste(el[grepl("KDM", el)], collapse = ", ")
+      if(el == ""){
+        el = "none"
+      }
+      return(el)
+    })
+
+cd$kdm = factor(ifelse(cd$kdm == "none", "no", "yes"), levels = c("no", "yes"))
+
+fit<- survfit(surv ~ kdm, data = cd)
+
+# Basic survival curves
+ggsurvplot(fit, data = cd)
+```
+
+
+
+
+```{r}
+dds <- DESeqDataSetFromTximport(txi.kallisto, cd, ~source)
+dds <- dds[rowSums(counts(dds) > 4)>10,]
+
+#kdm
+x <- dds[,cd[match(cd$sample, colnames(dds)),]$source == "NP" | cd[match(cd$sample, colnames(dds)),]$kdm == "yes"]
+x <- DESeq(x)
+x <- as.data.frame(results(x))
+
+#write.csv(x[order(abs(x$stat), decreasing = T),], file = "DEGs_Ch_3_vs_NP.csv")
+x = x[,c("log2FoldChange", "stat", "pvalue", "padj")]
+colnames(x) = paste0(colnames(x), "_kdm")
+res = cbind(res, x[match(rownames(res), rownames(x)),])
+
+x = txi.kallisto
+
+x$abundance = x$abundance[,cd[match(colnames(x$abundance), cd$sample),"source"] %in% c("Ch")]
+x$counts = x$counts[,cd[match(colnames(x$counts), cd$sample),"source"] %in% c("Ch")]
+x$length = x$length[,cd[match(colnames(x$length), cd$sample),"source"] %in% c("Ch")]
+x$infReps = x$infReps[cd[match(names(x$infReps), cd$sample),"source"] %in% c("Ch")]
+
+ddss <- DESeqDataSetFromTximport(x, droplevels(cd[cd$sample %in% colnames(x$counts),]), ~kdm)
+ddss <- ddss[rowSums(counts(ddss) > 4)>10,]
+
+x <- ddss[,cd[match(colnames(ddss), cd$sample),"source"] %in% c("Ch")]
+x <- DESeq(x)
+x <- as.data.frame(results(x))
+x = x[,c("log2FoldChange", "stat", "pvalue", "padj")]
+colnames(x) = paste0(colnames(x), "_kdm_Ch")
+
+res = cbind(res, x[match(rownames(res), rownames(x)),])
+res
+```
+```{r}
+cd$msh = ifelse(sapply(gsub("_", "/", cd$sample), function(el){
+      sum(mut[mut$Tumor_Sample_Barcode == el,"Hugo_Symbol"]=="MSH3")
+    }) > 0, "yes", "no")
+
+cd$msh = factor(cd$msh, levels = c("no", "yes"))
+
+fit<- survfit(surv ~ msh, data = cd)
+
+# Basic survival curves
+ggsurvplot(fit, data = cd)
+```
+```{r}
+dds <- DESeqDataSetFromTximport(txi.kallisto, cd, ~source)
+dds <- dds[rowSums(counts(dds) > 4)>10,]
+
+#msh
+x <- dds[,cd[match(cd$sample, colnames(dds)),]$source == "NP" | cd[match(cd$sample, colnames(dds)),]$msh == "yes"]
+x <- DESeq(x)
+x <- as.data.frame(results(x))
+
+#write.csv(x[order(abs(x$stat), decreasing = T),], file = "DEGs_Ch_3_vs_NP.csv")
+x = x[,c("log2FoldChange", "stat", "pvalue", "padj")]
+colnames(x) = paste0(colnames(x), "_msh")
+res = cbind(res, x[match(rownames(res), rownames(x)),])
+
+x = txi.kallisto
+
+x$abundance = x$abundance[,cd[match(colnames(x$abundance), cd$sample),"source"] %in% c("Ch")]
+x$counts = x$counts[,cd[match(colnames(x$counts), cd$sample),"source"] %in% c("Ch")]
+x$length = x$length[,cd[match(colnames(x$length), cd$sample),"source"] %in% c("Ch")]
+x$infReps = x$infReps[cd[match(names(x$infReps), cd$sample),"source"] %in% c("Ch")]
+
+ddss <- DESeqDataSetFromTximport(x, droplevels(cd[cd$sample %in% colnames(x$counts),]), ~msh)
+ddss <- ddss[rowSums(counts(ddss) > 4)>10,]
+
+x <- ddss[,cd[match(colnames(ddss), cd$sample),"source"] %in% c("Ch")]
+x <- DESeq(x)
+x <- as.data.frame(results(x))
+x = x[,c("log2FoldChange", "stat", "pvalue", "padj")]
+colnames(x) = paste0(colnames(x), "_msh_Ch")
+
+res = cbind(res, x[match(rownames(res), rownames(x)),])
+
+
+#cluster_1
+x <- dds[,cd[match(colnames(dds), cd$sample),"methylation_cluster"] %in% c("chordoma_1", "nucleus_pulposus")]
+x <- DESeq(x)
+x <- as.data.frame(results(x))
+
+#write.csv(x[order(abs(x$stat), decreasing = T),], file = "DEGs_Ch_1_vs_NP.csv")
+x = x[,c("log2FoldChange", "stat", "pvalue", "padj")]
+colnames(x) = paste0(colnames(x), "_1")
+res = cbind(res, x[match(rownames(res), rownames(x)),])
+
+#cluster_2
+x <- dds[,cd[match(colnames(dds), cd$sample),"methylation_cluster"] %in% c("chordoma_2", "nucleus_pulposus")]
+x <- DESeq(x)
+x <- as.data.frame(results(x))
+
+#write.csv(x[order(abs(x$stat), decreasing = T),], file = "DEGs_Ch_2_vs_NP.csv")
+x = x[,c("log2FoldChange", "stat", "pvalue", "padj")]
+colnames(x) = paste0(colnames(x), "_2")
+res = cbind(res, x[match(rownames(res), rownames(x)),])
+
+#cluster_3
+x <- dds[,cd[match(colnames(dds), cd$sample),"methylation_cluster"] %in% c("chordoma_3", "nucleus_pulposus")]
+x <- DESeq(x)
+x <- as.data.frame(results(x))
+
+#write.csv(x[order(abs(x$stat), decreasing = T),], file = "DEGs_Ch_3_vs_NP.csv")
+x = x[,c("log2FoldChange", "stat", "pvalue", "padj")]
+colnames(x) = paste0(colnames(x), "_3")
+res = cbind(res, x[match(rownames(res), rownames(x)),])
+
+
+#cluster_1 vs cluster_3
+
+x = txi.kallisto
+
+x$abundance = x$abundance[,cd[match(colnames(x$abundance), cd$sample),"methylation_cluster"] %in% c("chordoma_1", "chordoma_3")]
+x$counts = x$counts[,cd[match(colnames(x$counts), cd$sample),"methylation_cluster"] %in% c("chordoma_1", "chordoma_3")]
+x$length = x$length[,cd[match(colnames(x$length), cd$sample),"methylation_cluster"] %in% c("chordoma_1", "chordoma_3")]
+x$infReps = x$infReps[cd[match(names(x$infReps), cd$sample),"methylation_cluster"]  %in% c("chordoma_1", "chordoma_3")]
+
+ddss <- DESeqDataSetFromTximport(x, droplevels(cd[cd$sample %in% colnames(x$counts),]), ~methylation_cluster)
+ddss <- ddss[rowSums(counts(ddss) > 4)>10,]
+
+x <- ddss[,cd[match(colnames(ddss), cd$sample),"methylation_cluster"] %in% c("chordoma_1", "chordoma_3")]
+x <- DESeq(x)
+x <- as.data.frame(results(x))
+
+#write.csv(x[order(abs(x$stat), decreasing = T),], file = "DEGs_Ch_1_vs_NP.csv")
+x = x[,c("log2FoldChange", "stat", "pvalue", "padj")]
+colnames(x) = paste0(colnames(x), "_1v_3")
+res = cbind(res, x[match(rownames(res), rownames(x)),])
+
+res[order(abs(res$stat_1v_3), decreasing = T),]
+
+#cluster_1 vs cluster_2
+
+x = txi.kallisto
+
+x$abundance = x$abundance[,cd[match(colnames(x$abundance), cd$sample),"methylation_cluster"] %in% c("chordoma_1", "chordoma_2")]
+x$counts = x$counts[,cd[match(colnames(x$counts), cd$sample),"methylation_cluster"] %in% c("chordoma_1", "chordoma_2")]
+x$length = x$length[,cd[match(colnames(x$length), cd$sample),"methylation_cluster"] %in% c("chordoma_1", "chordoma_2")]
+x$infReps = x$infReps[cd[match(names(x$infReps), cd$sample),"methylation_cluster"]  %in% c("chordoma_1", "chordoma_2")]
+
+ddss <- DESeqDataSetFromTximport(x, droplevels(cd[cd$sample %in% colnames(x$counts),]), ~methylation_cluster)
+ddss <- ddss[rowSums(counts(ddss) > 4)>10,]
+
+x <- ddss[,cd[match(colnames(ddss), cd$sample),"methylation_cluster"] %in% c("chordoma_1", "chordoma_2")]
+x <- DESeq(x)
+x <- as.data.frame(results(x))
+
+#write.csv(x[order(abs(x$stat), decreasing = T),], file = "DEGs_Ch_1_vs_NP.csv")
+x = x[,c("log2FoldChange", "stat", "pvalue", "padj")]
+colnames(x) = paste0(colnames(x), "_1v_2")
+res = cbind(res, x[match(rownames(res), rownames(x)),])
+
+res[order(abs(res$stat_1v_2), decreasing = T),]
+```
+
+
+```{r}
+setwd(paste0(wd, "/res"))
+write.csv(res, file = "DEGs_Ch_vs_NP.csv")
+```
+
+```{r}
+'library(GSEAlm)
+
+wd = getwd()
+setwd(paste0(wd, "/dt"))
+hst = gmtPathways("roadmap_histones.gmt")
+
+x = HGNChelper::checkGeneSymbols(unique(unlist(hst)))
+x = x[!x$x %in% res$hgnc,]
+x = x[!x$Approved,]
+x = x[!is.na(x$Suggested.Symbol),]
+x
+
+hst = lapply(hst, function(el){
+  y = el[el %in% x$x]
+  el[match(y,el)] = x[match(y, x$x),"Suggested.Symbol"]
+  return(el)
+})
+
+
+x = setNames(res[rownames(log_c),"hgnc"], rownames(log_c))
+
+x = x[!x==""]
+
+x = x[x %in% unique(unlist(hst))]
+
+dim(log_c)
+exp_hgnc = log_c[names(x),]
+rownames(exp_hgnc) = x
+
+x = unique(unlist(hst))
+el = names(hst)[1]
+
+hst_mat = sapply(names(hst), function(el){
+  as.numeric(x %in% hst[[el]])
+})
+
+rownames(hst_mat) = x
+
+hst_mat[1:10,1:10]
+
+
+hst_mat = hst_mat[rownames(hst_mat) %in% rownames(exp_hgnc),]
+exp_hgnc = exp_hgnc[rownames(hst_mat),]
+hst_mat[1:5,1:5]
+exp_hgnc[1:5,1:5]
+
+gsealm_hst = GSNormalize(dataset = exp_hgnc, incidence = flip(hst_mat))
+
+X = flip(scale(flip(gsealm_hst)))
+
+cols = setNames(RColorBrewer::brewer.pal(12, "Paired")[c(2,4,6,8,10,11,12)], c(paste0("chordoma_", 1:4), "somatotropinoma", "nucleus_pulposus", "chordoma_cell_line"))
+
+y = sapply(colnames(X), function(el){
+      el = gsub("_", "/", el)
+      y = mutations[mutations$Tumor_Sample_Barcode %in% el,"Hugo_Symbol"]
+      y = unique(y[grepl("KDM", y)])
+      y = paste(y, collapse = ", ")
+      return(y)
+    })
+
+y[y==""] = "none"
+
+ha = HeatmapAnnotation(
+    #PDE4DIP = df$PDE4DIP,
+    #CRLF2 = df$CRLF2,
+    #MUC3A = df$MUC3A,
+    `IDH status` = ifelse(cd[match(colnames(X), cd$sample),]$idh == "mut", "IDH1R132H", "normal"),
+    `CDKN2A/B` = ifelse(cd[match(colnames(X), cd$sample),]$cdkn == "loh", "LOH", "normal"),
+    `Lymphocyte infiltration` = cd[match(colnames(X), cd$sample),]$ly,
+    KDM = y,
+    `Copy number %` = cd[match(colnames(X), cd$sample),]$cnv,
+    `Mutation load` = cd[match(colnames(X), cd$sample),]$mut,
+    Sex = cd[match(colnames(X), cd$sample),]$sex,
+    Age = cd[match(colnames(X), cd$sample),]$age,
+    `Methylation cluster` = cd[match(colnames(X), cd$sample),"methylation_cluster"],
+    #`RNA cluster` = cd[match(colnames(X), cd$sample),"rna_cluster"],
+    col = list(`IDH status` = c("IDH1R132H" = "aquamarine4", "normal" = "white"),
+               `CDKN2A/B` = c("LOH" = "bisque4", "normal" = "white"),
+               `Lymphocyte infiltration` = c("low" = "white", "high" = "darkslateblue"),
+               Sex = c("male" = "lightskyblue", "female" = "lightpink"),
+               `Copy number %` = circlize::colorRamp2(c(quantile(cd$cnv, na.rm = T, seq(0,1,0.125)),100), c("white", rev(viridis::rocket(8)), "black")),
+               `Mutation load` = circlize::colorRamp2(c(0,quantile(dropNA(cd$mut))), c("white", rev(viridis::rocket(5)))),
+               Age = circlize::colorRamp2(c(0,10*(2:8),100), c("white", rev(viridis::rocket(7)), "black")),
+               #`RNA cluster` = setNames(RColorBrewer::brewer.pal(5, "Set2"), c(paste0("chordoma_", toupper(letters[1:4])), "nucleus_pulposus")),
+               `Methylation cluster` = cols)
+)
+
+y = sapply(unique(sapply(strsplit(rownames(X), "_"), function(el){el[1]})), function(el){
+  if(sum(grepl(el, rownames(X)))==1){
+    return(X[grepl(el, rownames(X)),])
+  }else{
+    return(colMeans(X[grepl(el, rownames(X)),]))
+  }
+  
+})[colnames(X),]
+y = hclust(dist(y))
+plot(y)
+
+#ra = as.data.frame(-log10(as.matrix(res[rownames(X),grepl("padj", colnames(res))])))
+#colnames(ra) = names(key)
+#ra = rowAnnotation(df = ra, col = setNames(lapply(colnames(ra), #function(el){circlize::colorRamp2(c(0,1-1e-5,1,-log10(0.05),2,4,max(ra, na.rm = T)), c("white", "white", "blue", "cyan","green", "yellow", "orange"))}), colnames(ra)), show_legend = c(T,rep(F,length(colnames(ra))-1)))
+
+ht = Heatmap(X,
+             name = "Scaled GSEAlm score",
+        show_row_names = F, show_row_dend = F,
+        #left_annotation = ra,
+        clustering_method_rows = "ward.D", clustering_distance_rows = "manhattan",
+        #clustering_method_columns = "ward.D", clustering_distance_columns = "manhattan",
+        cluster_columns = y,
+        row_split = sapply(strsplit(rownames(X), "_"), function(el){el[1]}),
+        #column_split = cd[colnames(X),"methylation_cluster"],
+        show_column_names = F,
+        top_annotation = ha,
+        row_title_rot = 0,
+        col = circlize::colorRamp2(quantile(X[,grepl("_", colnames(X))], probs = seq(0, 1, 1/15)), c(rev(RColorBrewer::brewer.pal(8, "RdPu")), RColorBrewer::brewer.pal(8, "YlGn"))))
+
+png(filename = "ht_hist.png", width = 30, height = 40, units = "cm", res = 400)
+draw(ht, heatmap_legend_side = "right", annotation_legend_side = "right", merge_legend = TRUE)
+dev.off()'
+
+```
+
+
+
+
+
+
+
+
+
+```{r}
+library(fgsea)
+```
+
+```{r}
+wd = getwd()
+setwd(paste0(wd, "/dt"))
+c2 = gmtPathways("c2.all.v7.4.entrez.gmt")
+```
+```{r}
+reactome = c2[grepl("REACTOME", names(c2))]
+length(reactome)
+```
+
+
+```{r}
+res$entrez = trl[match(rownames(res), trl$ensembl_gene_id),"entrezgene_id"]
+```
+
+
+
+```{r}
+
+
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = reactome, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+gsea_reactome = as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_1), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_1, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = reactome, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_1")
+gsea_reactome = cbind(gsea_reactome, fgseaRes[match(gsea_reactome$pathway, fgseaRes$pathway_1),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_2), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_2, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = reactome, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_2")
+gsea_reactome = cbind(gsea_reactome, fgseaRes[match(gsea_reactome$pathway, fgseaRes$pathway_2),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_3), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_3, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = reactome, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_3")
+gsea_reactome = cbind(gsea_reactome, fgseaRes[match(gsea_reactome$pathway, fgseaRes$pathway_3),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_1v_2), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_1v_2, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = reactome, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_1v_2")
+gsea_reactome = cbind(gsea_reactome, fgseaRes[match(gsea_reactome$pathway, fgseaRes$pathway_1v_2),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_1v_3), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_1v_3, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = reactome, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_1v_3")
+gsea_reactome = cbind(gsea_reactome, fgseaRes[match(gsea_reactome$pathway, fgseaRes$pathway_1v_3),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_msh), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_msh, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = reactome, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_msh")
+gsea_reactome = cbind(gsea_reactome, fgseaRes[match(gsea_reactome$pathway, fgseaRes$pathway_msh),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_msh_Ch), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_msh_Ch, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = reactome, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_msh_Ch")
+gsea_reactome = cbind(gsea_reactome, fgseaRes[match(gsea_reactome$pathway, fgseaRes$pathway_msh_Ch),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_kdm), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_kdm, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = reactome, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_kdm")
+gsea_reactome = cbind(gsea_reactome, fgseaRes[match(gsea_reactome$pathway, fgseaRes$pathway_kdm),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_kdm_Ch), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_kdm_Ch, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = reactome, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_kdm_Ch")
+gsea_reactome = cbind(gsea_reactome, fgseaRes[match(gsea_reactome$pathway, fgseaRes$pathway_kdm_Ch),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_surv), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_surv, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = reactome, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_surv")
+gsea_reactome = cbind(gsea_reactome, fgseaRes[match(gsea_reactome$pathway, fgseaRes$pathway_surv),])
+
+gsea_reactome$NES_surv = -gsea_reactome$NES_surv
+
+
+print("Is it 0?")
+
+for(el in colnames(gsea_reactome)[grepl("pathway", colnames(gsea_reactome))]){
+  print(paste0(el, ": ", sum(dropNA(!gsea_reactome$pathway == gsea_reactome[,el]))))
+}
+
+
+gsea_reactome = gsea_reactome[,!grepl("pathway_", colnames(gsea_reactome))]
+gsea_reactome = gsea_reactome[,!grepl("size_", colnames(gsea_reactome))]
+
+
+gsea_reactome = gsea_reactome[,!grepl("\\.", colnames(gsea_reactome))]
+
+x = NULL
+for(el in colnames(gsea_reactome)[grepl("NES", colnames(gsea_reactome))]){
+  x = c(x, gsea_reactome[order(gsea_reactome[,el], decreasing = T),"pathway"][1:5])
+x = c(x, gsea_reactome[order(gsea_reactome[,el], decreasing = F),"pathway"][1:5])
+}
+
+x = unique(x)
+
+
+df = data.frame(term = rep(x, length(colnames(gsea_reactome)[grepl("NES", colnames(gsea_reactome))])), padj = 1, NES = 0, group = unlist(lapply(colnames(gsea_reactome)[grepl("NES", colnames(gsea_reactome))], rep, times = length(x))))
+
+
+df$group = gsub("NES", "chordoma", df$group)
+
+
+
+
+for(el in 1:length(df$term)){
+  df[el, "NES"] = gsea_reactome[match(df[el, "term"], gsea_reactome$pathway),paste0("NES", gsub("chordoma", "", df[el,"group"]))]
+  df[el, "padj"] = gsea_reactome[match(df[el, "term"], gsea_reactome$pathway),paste0("padj", gsub("chordoma", "", df[el,"group"]))]
+}
+
+df = df[df$padj<=0.1,]
+df = droplevels(df)
+
+
+'y = matrix(0, ncol = length(unique(df$term)), nrow = length(unique(unlist(reactome[unique(df$term)]))), dimnames = list(rn = unique(unlist(reactome[unique(df$term)])), cn = unique(df$term)))
+
+for(el in unique(df$term)){
+  y[reactome[[el]],el] = 1
+}
+
+y = hclust(dist(flip(y), method = "binary"), method = "complete")
+
+y = unique(df$term)[y$order]'
+
+y = as.character(unique(df$term)[hclust(dist(as.matrix(gsea_reactome[match(unique(df$term), gsea_reactome$pathway),grepl("NES", colnames(gsea_reactome))])))$order])
+
+library(ggplot2)
+library(stringr)
+
+f = function(el){paste(strwrap(str_replace_all(gsub("REACTOME_", "", el), "_", " "), width = 35), collapse = "\n")}
+
+df$logp = -log10(df$padj)
+df$logp[df$logp>4] = 4
+
+
+
+df$term = factor(as.character(df$term), levels = y)
+x = setNames(c("Chordoma\nvs NP", "Chordoma 1\nvs NP", "Chordoma 2\nvs NP", "Chordoma 3\nvs NP","MSH3 chordoma \nvs NP","KDM chordoma \nvs NP", "Chordoma 1\nvs Chordoma 2", "Chordoma 1\nvs Chordoma 3", "MSH3 chordoma \nvs remaining samples", "KDM chordoma \nvs remaining samples", "Survival"),c("chordoma", "chordoma_1", "chordoma_2", "chordoma_3", "chordoma_msh","chordoma_kdm", "chordoma_1v_2", "chordoma_1v_3", "chordoma_msh_Ch", "chordoma_kdm_Ch","chordoma_surv"))
+df$group = factor(x[df$group], levels = x)
+
+p = ggplot(data = df) +
+  geom_point(mapping = aes(x = group, y = term, color = NES, size = logp)) +
+  scale_y_discrete(breaks = y, labels = sapply(y,f)) +
+  scale_size(name = "Adj. p-value", limits = c(1,4), breaks = c(1:4), labels = 10^(-(1:4))) +
+  scale_color_gradientn(colours = c(rev(RColorBrewer::brewer.pal(8, "RdPu")), RColorBrewer::brewer.pal(8, "YlGn")), limits = (ceiling(10*max(abs(df$NES)))/10)*c(-1,1)) +
+  theme_bw()+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  labs(title = "Reactome", subtitle = "Gene Set Enrichment Analysis",x = "", y = "")
+
+setwd(paste0(wd, "/gsea"))
+ggsave(plot = p, filename = "gsea_reactome.png", width = 25, height = 45, units = "cm", dpi = 400)
+write.csv(gsea_reactome, file = "gsea_reactome.csv")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+setwd(paste0(wd, "/dt"))
+go = gmtPathways("c5.all.v7.4.entrez.gmt")
+
+length(go)
+go = go[!grepl("HP_", names(go))]
+length(go)
+```
+
+
+```{r}
+Q = res
+Q = Q[order(abs(Q$log2FoldChange), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = go, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+gsea_go = as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_1), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_1, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = go, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_1")
+gsea_go = cbind(gsea_go, fgseaRes[match(gsea_go$pathway, fgseaRes$pathway_1),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_2), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_2, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = go, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_2")
+gsea_go = cbind(gsea_go, fgseaRes[match(gsea_go$pathway, fgseaRes$pathway_2),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_3), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_3, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = go, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_3")
+gsea_go = cbind(gsea_go, fgseaRes[match(gsea_go$pathway, fgseaRes$pathway_3),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_1v_2), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_1v_2, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = go, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_1v_2")
+gsea_go = cbind(gsea_go, fgseaRes[match(gsea_go$pathway, fgseaRes$pathway_1v_2),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_1v_3), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_1v_3, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = go, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_1v_3")
+gsea_go = cbind(gsea_go, fgseaRes[match(gsea_go$pathway, fgseaRes$pathway_1v_3),])
+
+print("Is it 0?")
+sum(!gsea_go$pathway == gsea_go$pathway_1)
+sum(!gsea_go$pathway == gsea_go$pathway_2)
+sum(!gsea_go$pathway == gsea_go$pathway_3)
+sum(!gsea_go$pathway == gsea_go$pathway_1_2)
+sum(!gsea_go$pathway == gsea_go$pathway_1_3)
+
+gsea_go = gsea_go[,!grepl("pathway_", colnames(gsea_go))]
+gsea_go = gsea_go[,!grepl("size_", colnames(gsea_go))]
+
+gsea_go
+
+x = NULL
+x = c(x, gsea_go[order(gsea_go$NES, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_go[order(gsea_go$NES, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_go[order(gsea_go$NES_1, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_go[order(gsea_go$NES_1, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_go[order(gsea_go$NES_2, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_go[order(gsea_go$NES_2, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_go[order(gsea_go$NES_3, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_go[order(gsea_go$NES_3, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_go[order(gsea_go$NES_1v_2, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_go[order(gsea_go$NES_1v_2, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_go[order(gsea_go$NES_1v_3, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_go[order(gsea_go$NES_1v_3, decreasing = F),"pathway"][1:5])
+x = unique(x)
+df = data.frame(term = rep(x, 6), padj = 1, NES = 0, group = unlist(lapply(paste0("chordoma", c("", paste0("_",1:3), "_1v_2", "_1v_3")), rep, times = length(x))))
+
+for(el in 1:length(df$term)){
+  df[el, "NES"] = gsea_go[match(df[el, "term"], gsea_go$pathway),paste0("NES", gsub("chordoma", "", df[el,"group"]))]
+  df[el, "padj"] = gsea_go[match(df[el, "term"], gsea_go$pathway),paste0("padj", gsub("chordoma", "", df[el,"group"]))]
+}
+
+df = df[!is.na(df$padj),]
+df = df[df$padj<=0.1,]
+df = droplevels(df)
+
+
+'y = matrix(0, ncol = length(unique(df$term)), nrow = length(unique(unlist(go[unique(df$term)]))), dimnames = list(rn = unique(unlist(go[unique(df$term)])), cn = unique(df$term)))
+
+for(el in unique(df$term)){
+  y[go[[el]],el] = 1
+}
+
+y = hclust(dist(flip(y), method = "binary"), method = "complete")
+
+y = unique(df$term)[y$order]'
+
+y = as.character(unique(df$term)[hclust(dist(as.matrix(gsea_go[match(unique(df$term), gsea_go$pathway),grepl("NES", colnames(gsea_go))])))$order])
+
+library(ggplot2)
+library(stringr)
+
+f = function(el){paste(strwrap(str_replace_all(gsub("go_", "", el), "_", " "), width = 35), collapse = "\n")}
+
+df$logp = -log10(df$padj)
+df$logp[df$logp>4] = 4
+
+df$term = factor(as.character(df$term), levels = y)
+x = setNames(c("Chordoma\nvs NP", "Chordoma 1\nvs NP", "Chordoma 2\nvs NP", "Chordoma 3\nvs NP", "Chordoma 1\nvs Chordoma 3", "Chordoma 1\nvs Chordoma 2"),c("chordoma", "chordoma_1", "chordoma_2", "chordoma_3", "chordoma_1v_2", "chordoma_1v_3"))
+df$group = factor(x[df$group], levels = x)
+
+p = ggplot(data = df) +
+  geom_point(mapping = aes(x = group, y = term, color = NES, size = logp)) +
+  scale_y_discrete(breaks = y, labels = sapply(y,f)) +
+  scale_size(name = "Adj. p-value", limits = c(1,4), breaks = c(1:4), labels = 10^(-(1:4))) +
+  scale_color_gradientn(colours = c(rev(RColorBrewer::brewer.pal(8, "RdPu")), RColorBrewer::brewer.pal(8, "YlGn")), limits = (ceiling(10*max(abs(df$NES)))/10)*c(-1,1)) +
+  theme_bw()+
+  labs(title = "Gene Ontology", subtitle = "Gene Set Enrichment Analysis",x = "", y = "")
+
+setwd(paste0(wd, "/gsea"))
+ggsave(plot = p, filename = "gsea_go.png", width = 25, height = 35, units = "cm", dpi = 400)
+write.csv(gsea_go, file = "gsea_go.csv")
+```
+
+
+
+
+
+
+```{r}
+setwd(paste0(wd, "/dt"))
+c6 = gmtPathways("c6.all.v7.4.entrez.gmt")
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = c6, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+gsea_c6 = as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_1), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_1, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = c6, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_1")
+gsea_c6 = cbind(gsea_c6, fgseaRes[match(gsea_c6$pathway, fgseaRes$pathway_1),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_2), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_2, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = c6, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_2")
+gsea_c6 = cbind(gsea_c6, fgseaRes[match(gsea_c6$pathway, fgseaRes$pathway_2),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_3), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_3, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = c6, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_3")
+gsea_c6 = cbind(gsea_c6, fgseaRes[match(gsea_c6$pathway, fgseaRes$pathway_3),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_1v_2), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_1v_2, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = c6, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_1v_2")
+gsea_c6 = cbind(gsea_c6, fgseaRes[match(gsea_c6$pathway, fgseaRes$pathway_1v_2),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_1v_3), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_1v_3, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = c6, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_1v_3")
+gsea_c6 = cbind(gsea_c6, fgseaRes[match(gsea_c6$pathway, fgseaRes$pathway_1v_3),])
+
+print("Is it 0?")
+sum(!gsea_c6$pathway == gsea_c6$pathway_1)
+sum(!gsea_c6$pathway == gsea_c6$pathway_2)
+sum(!gsea_c6$pathway == gsea_c6$pathway_3)
+sum(!gsea_c6$pathway == gsea_c6$pathway_1_2)
+sum(!gsea_c6$pathway == gsea_c6$pathway_1_3)
+
+gsea_c6 = gsea_c6[,!grepl("pathway_", colnames(gsea_c6))]
+gsea_c6 = gsea_c6[,!grepl("size_", colnames(gsea_c6))]
+
+gsea_c6
+
+
+
+x = NULL
+x = c(x, gsea_c6[order(gsea_c6$NES, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_c6[order(gsea_c6$NES, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_c6[order(gsea_c6$NES_1, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_c6[order(gsea_c6$NES_1, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_c6[order(gsea_c6$NES_2, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_c6[order(gsea_c6$NES_2, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_c6[order(gsea_c6$NES_3, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_c6[order(gsea_c6$NES_3, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_c6[order(gsea_c6$NES_1v_2, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_c6[order(gsea_c6$NES_1v_2, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_c6[order(gsea_c6$NES_1v_3, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_c6[order(gsea_c6$NES_1v_3, decreasing = F),"pathway"][1:5])
+x = unique(x)
+df = data.frame(term = rep(x, 6), padj = 1, NES = 0, group = unlist(lapply(paste0("chordoma", c("", paste0("_",1:3), "_1v_2", "_1v_3")), rep, times = length(x))))
+
+for(el in 1:length(df$term)){
+  df[el, "NES"] = gsea_c6[match(df[el, "term"], gsea_c6$pathway),paste0("NES", gsub("chordoma", "", df[el,"group"]))]
+  df[el, "padj"] = gsea_c6[match(df[el, "term"], gsea_c6$pathway),paste0("padj", gsub("chordoma", "", df[el,"group"]))]
+}
+
+df = df[df$term %in% names(tapply(df$padj, df$term, min)[tapply(df$padj, df$term, min) <0.05]),]
+
+
+y = matrix(0, ncol = length(unique(df$term)), nrow = length(unique(unlist(c6[unique(df$term)]))), dimnames = list(rn = unique(unlist(c6[unique(df$term)])), cn = unique(df$term)))
+
+for(el in unique(df$term)){
+  y[c6[[el]],el] = 1
+}
+
+y = hclust(dist(flip(y), method = "binary"), method = "complete")
+
+y = unique(df$term)[y$order]
+
+library(ggplot2)
+library(stringr)
+
+f = function(el){paste(strwrap(str_replace_all(gsub("c6_", "", el), "_", " "), width = 35), collapse = "\n")}
+
+df$logp = -log10(df$padj)
+df$logp[df$logp>4] = 4
+
+df$term = factor(as.character(df$term), levels = y)
+df$group = factor(df$group, levels = c("chordoma", "chordoma_1", "chordoma_2", "chordoma_3", "chordoma_1v_2", "chordoma_1v_3"))
+
+p = ggplot(data = df) +
+  geom_point(mapping = aes(x = group, y = term, color = NES, size = logp)) +
+  scale_y_discrete(breaks = y, labels = sapply(y,f)) +
+  scale_size(name = "Adj. p-value", limits = c(0,4), breaks = c(0:4), labels = 10^(-(0:4))) +
+  scale_color_gradientn(colours = c(rev(RColorBrewer::brewer.pal(8, "RdPu")), RColorBrewer::brewer.pal(8, "YlGn")), limits = (ceiling(10*max(abs(df$NES)))/10)*c(-1,1)) +
+  theme_bw()+
+  labs(title = "Molecular Signature Database: oncogenic", subtitle = "Gene Set Enrichment Analysis",x = "", y = "")
+
+setwd(paste0(wd, "/gsea"))
+ggsave(plot = p, filename = "gsea_c6.png", width = 25, height = 25, units = "cm", dpi = 400)
+write.csv(gsea_c6, file = "gsea_c6.csv")
+```
+
+```{r}
+setwd(paste0(wd, "/dt"))
+c3 = gmtPathways("c3.tft.v7.4.entrez.gmt")
+c3 = c3[!grepl("UNKNOWN", names(c3))]
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = c3, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+gsea_c3 = as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_1), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_1, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = c3, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_1")
+gsea_c3 = cbind(gsea_c3, fgseaRes[match(gsea_c3$pathway, fgseaRes$pathway_1),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_2), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_2, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = c3, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_2")
+gsea_c3 = cbind(gsea_c3, fgseaRes[match(gsea_c3$pathway, fgseaRes$pathway_2),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_3), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_3, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = c3, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_3")
+gsea_c3 = cbind(gsea_c3, fgseaRes[match(gsea_c3$pathway, fgseaRes$pathway_3),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_1v_2), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_1v_2, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = c3, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_1v_2")
+gsea_c3 = cbind(gsea_c3, fgseaRes[match(gsea_c3$pathway, fgseaRes$pathway_1v_2),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_1v_3), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_1v_3, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = c3, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_1v_3")
+gsea_c3 = cbind(gsea_c3, fgseaRes[match(gsea_c3$pathway, fgseaRes$pathway_1v_3),])
+
+print("Is it 0?")
+sum(!gsea_c3$pathway == gsea_c3$pathway_1)
+sum(!gsea_c3$pathway == gsea_c3$pathway_2)
+sum(!gsea_c3$pathway == gsea_c3$pathway_3)
+sum(!gsea_c3$pathway == gsea_c3$pathway_1_2)
+sum(!gsea_c3$pathway == gsea_c3$pathway_1_3)
+
+gsea_c3 = gsea_c3[,!grepl("pathway_", colnames(gsea_c3))]
+gsea_c3 = gsea_c3[,!grepl("size_", colnames(gsea_c3))]
+
+gsea_c3
+
+
+
+x = NULL
+x = c(x, gsea_c3[order(gsea_c3$NES, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_c3[order(gsea_c3$NES, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_c3[order(gsea_c3$NES_1, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_c3[order(gsea_c3$NES_1, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_c3[order(gsea_c3$NES_2, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_c3[order(gsea_c3$NES_2, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_c3[order(gsea_c3$NES_3, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_c3[order(gsea_c3$NES_3, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_c3[order(gsea_c3$NES_1v_2, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_c3[order(gsea_c3$NES_1v_2, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_c3[order(gsea_c3$NES_1v_3, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_c3[order(gsea_c3$NES_1v_3, decreasing = F),"pathway"][1:5])
+x = unique(x)
+df = data.frame(term = rep(x, 6), padj = 1, NES = 0, group = unlist(lapply(paste0("chordoma", c("", paste0("_",1:3), "_1v_2", "_1v_3")), rep, times = length(x))))
+
+for(el in 1:length(df$term)){
+  df[el, "NES"] = gsea_c3[match(df[el, "term"], gsea_c3$pathway),paste0("NES", gsub("chordoma", "", df[el,"group"]))]
+  df[el, "padj"] = gsea_c3[match(df[el, "term"], gsea_c3$pathway),paste0("padj", gsub("chordoma", "", df[el,"group"]))]
+}
+
+df = df[df$term %in% names(tapply(df$padj, df$term, min)[tapply(df$padj, df$term, min) <0.05]),]
+
+
+y = matrix(0, ncol = length(unique(df$term)), nrow = length(unique(unlist(c3[unique(df$term)]))), dimnames = list(rn = unique(unlist(c3[unique(df$term)])), cn = unique(df$term)))
+
+for(el in unique(df$term)){
+  y[c3[[el]],el] = 1
+}
+
+y = hclust(dist(flip(y), method = "binary"), method = "complete")
+
+y = unique(df$term)[y$order]
+
+library(ggplot2)
+library(stringr)
+
+f = function(el){paste(strwrap(str_replace_all(gsub("c3_", "", el), "_", " "), width = 35), collapse = "\n")}
+
+df$logp = -log10(df$padj)
+df$logp[df$logp>4] = 4
+
+df$term = factor(as.character(df$term), levels = y)
+df$group = factor(df$group, levels = c("chordoma", "chordoma_1", "chordoma_2", "chordoma_3", "chordoma_1v_2", "chordoma_1v_3"))
+
+p = ggplot(data = df) +
+  geom_point(mapping = aes(x = group, y = term, color = NES, size = logp)) +
+  scale_y_discrete(breaks = y, labels = sapply(y,f)) +
+  scale_size(name = "Adj. p-value", limits = c(0,4), breaks = c(0:4), labels = 10^(-(0:4))) +
+  scale_color_gradientn(colours = c(rev(RColorBrewer::brewer.pal(8, "RdPu")), RColorBrewer::brewer.pal(8, "YlGn")), limits = (ceiling(10*max(abs(df$NES)))/10)*c(-1,1)) +
+  theme_bw()+
+  labs(title = "Molecular Signature Database: transcription factors", subtitle = "Gene Set Enrichment Analysis",x = "", y = "")
+
+setwd(paste0(wd, "/gsea"))
+ggsave(plot = p, filename = "gsea_c3.png", width = 25, height = 25, units = "cm", dpi = 400)
+write.csv(gsea_c3, file = "gsea_c3.csv")
+```
+
+```{r}
+setwd(paste0(wd, "/dt"))
+c4 = gmtPathways("c4.cgn.v7.4.entrez.gmt")
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = c4, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+gsea_c4 = as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_1), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_1, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = c4, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_1")
+gsea_c4 = cbind(gsea_c4, fgseaRes[match(gsea_c4$pathway, fgseaRes$pathway_1),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_2), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_2, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = c4, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_2")
+gsea_c4 = cbind(gsea_c4, fgseaRes[match(gsea_c4$pathway, fgseaRes$pathway_2),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_3), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_3, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = c4, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_3")
+gsea_c4 = cbind(gsea_c4, fgseaRes[match(gsea_c4$pathway, fgseaRes$pathway_3),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_1v_2), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_1v_2, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = c4, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_1v_2")
+gsea_c4 = cbind(gsea_c4, fgseaRes[match(gsea_c4$pathway, fgseaRes$pathway_1v_2),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_1v_3), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_1v_3, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = c4, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_1v_3")
+gsea_c4 = cbind(gsea_c4, fgseaRes[match(gsea_c4$pathway, fgseaRes$pathway_1v_3),])
+
+print("Is it 0?")
+sum(!gsea_c4$pathway == gsea_c4$pathway_1)
+sum(!gsea_c4$pathway == gsea_c4$pathway_2)
+sum(!gsea_c4$pathway == gsea_c4$pathway_3)
+sum(!gsea_c4$pathway == gsea_c4$pathway_1_2)
+sum(!gsea_c4$pathway == gsea_c4$pathway_1_3)
+
+gsea_c4 = gsea_c4[,!grepl("pathway_", colnames(gsea_c4))]
+gsea_c4 = gsea_c4[,!grepl("size_", colnames(gsea_c4))]
+
+gsea_c4
+
+
+
+x = NULL
+x = c(x, gsea_c4[order(gsea_c4$NES, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_c4[order(gsea_c4$NES, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_c4[order(gsea_c4$NES_1, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_c4[order(gsea_c4$NES_1, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_c4[order(gsea_c4$NES_2, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_c4[order(gsea_c4$NES_2, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_c4[order(gsea_c4$NES_3, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_c4[order(gsea_c4$NES_3, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_c4[order(gsea_c4$NES_1v_2, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_c4[order(gsea_c4$NES_1v_2, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_c4[order(gsea_c4$NES_1v_3, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_c4[order(gsea_c4$NES_1v_3, decreasing = F),"pathway"][1:5])
+x = unique(x)
+df = data.frame(term = rep(x, 6), padj = 1, NES = 0, group = unlist(lapply(paste0("chordoma", c("", paste0("_",1:3), "_1v_2", "_1v_3")), rep, times = length(x))))
+
+for(el in 1:length(df$term)){
+  df[el, "NES"] = gsea_c4[match(df[el, "term"], gsea_c4$pathway),paste0("NES", gsub("chordoma", "", df[el,"group"]))]
+  df[el, "padj"] = gsea_c4[match(df[el, "term"], gsea_c4$pathway),paste0("padj", gsub("chordoma", "", df[el,"group"]))]
+}
+
+df = df[df$term %in% names(tapply(df$padj, df$term, min)[tapply(df$padj, df$term, min) <0.05]),]
+
+
+y = matrix(0, ncol = length(unique(df$term)), nrow = length(unique(unlist(c4[unique(df$term)]))), dimnames = list(rn = unique(unlist(c4[unique(df$term)])), cn = unique(df$term)))
+
+for(el in unique(df$term)){
+  y[c4[[el]],el] = 1
+}
+
+y = hclust(dist(flip(y), method = "binary"), method = "complete")
+
+y = unique(df$term)[y$order]
+
+library(ggplot2)
+library(stringr)
+
+f = function(el){paste(strwrap(str_replace_all(gsub("c4_", "", el), "_", " "), width = 35), collapse = "\n")}
+
+df$logp = -log10(df$padj)
+df$logp[df$logp>4] = 4
+
+df$term = factor(as.character(df$term), levels = y)
+df$group = factor(df$group, levels = c("chordoma", "chordoma_1", "chordoma_2", "chordoma_3", "chordoma_1v_2", "chordoma_1v_3"))
+
+p = ggplot(data = df) +
+  geom_point(mapping = aes(x = group, y = term, color = NES, size = logp)) +
+  scale_y_discrete(breaks = y, labels = sapply(y,f)) +
+  scale_size(name = "Adj. p-value", limits = c(0,4), breaks = c(0:4), labels = 10^(-(0:4))) +
+  scale_color_gradientn(colours = c(rev(RColorBrewer::brewer.pal(8, "RdPu")), RColorBrewer::brewer.pal(8, "YlGn")), limits = (ceiling(10*max(abs(df$NES)))/10)*c(-1,1)) +
+  theme_bw()+
+  labs(title = "Molecular Signature Database: cancer gene neighborhood", subtitle = "Gene Set Enrichment Analysis",x = "", y = "")
+
+setwd(paste0(wd, "/gsea"))
+ggsave(plot = p, filename = "gsea_c4.png", width = 25, height = 25, units = "cm", dpi = 400)
+write.csv(gsea_c4, file = "gsea_c4.csv")
+```
+
+```{r}
+setwd(paste0(wd, "/dt"))
+hal = gmtPathways("h.all.v7.4.entrez.gmt")
+```
+
+```{r}
+Q = res
+Q = Q[order(abs(Q$log2FoldChange), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = hal, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+gsea_hal = as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_1), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_1, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = hal, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_1")
+gsea_hal = cbind(gsea_hal, fgseaRes[match(gsea_hal$pathway, fgseaRes$pathway_1),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_2), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_2, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = hal, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_2")
+gsea_hal = cbind(gsea_hal, fgseaRes[match(gsea_hal$pathway, fgseaRes$pathway_2),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_3), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_3, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = hal, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_3")
+gsea_hal = cbind(gsea_hal, fgseaRes[match(gsea_hal$pathway, fgseaRes$pathway_3),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_1v_2), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_1v_2, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = hal, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_1v_2")
+gsea_hal = cbind(gsea_hal, fgseaRes[match(gsea_hal$pathway, fgseaRes$pathway_1v_2),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_1v_3), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_1v_3, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = hal, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_1v_3")
+gsea_hal = cbind(gsea_hal, fgseaRes[match(gsea_hal$pathway, fgseaRes$pathway_1v_3),])
+
+print("Is it 0?")
+sum(!gsea_hal$pathway == gsea_hal$pathway_1)
+sum(!gsea_hal$pathway == gsea_hal$pathway_2)
+sum(!gsea_hal$pathway == gsea_hal$pathway_3)
+sum(!gsea_hal$pathway == gsea_hal$pathway_1_2)
+sum(!gsea_hal$pathway == gsea_hal$pathway_1_3)
+
+gsea_hal = gsea_hal[,!grepl("pathway_", colnames(gsea_hal))]
+gsea_hal = gsea_hal[,!grepl("size_", colnames(gsea_hal))]
+
+gsea_hal
+
+x = NULL
+x = c(x, gsea_hal[order(gsea_hal$NES, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_hal[order(gsea_hal$NES, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_hal[order(gsea_hal$NES_1, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_hal[order(gsea_hal$NES_1, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_hal[order(gsea_hal$NES_2, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_hal[order(gsea_hal$NES_2, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_hal[order(gsea_hal$NES_3, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_hal[order(gsea_hal$NES_3, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_hal[order(gsea_hal$NES_1v_2, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_hal[order(gsea_hal$NES_1v_2, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_hal[order(gsea_hal$NES_1v_3, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_hal[order(gsea_hal$NES_1v_3, decreasing = F),"pathway"][1:5])
+x = unique(x)
+df = data.frame(term = rep(x, 6), padj = 1, NES = 0, group = unlist(lapply(paste0("chordoma", c("", paste0("_",1:3), "_1v_2", "_1v_3")), rep, times = length(x))))
+
+for(el in 1:length(df$term)){
+  df[el, "NES"] = gsea_hal[match(df[el, "term"], gsea_hal$pathway),paste0("NES", gsub("chordoma", "", df[el,"group"]))]
+  df[el, "padj"] = gsea_hal[match(df[el, "term"], gsea_hal$pathway),paste0("padj", gsub("chordoma", "", df[el,"group"]))]
+}
+
+df = df[df$padj<=0.1,]
+df = droplevels(df)
+
+
+'y = matrix(0, ncol = length(unique(df$term)), nrow = length(unique(unlist(hal[unique(df$term)]))), dimnames = list(rn = unique(unlist(hal[unique(df$term)])), cn = unique(df$term)))
+
+for(el in unique(df$term)){
+  y[hal[[el]],el] = 1
+}
+
+y = hclust(dist(flip(y), method = "binary"), method = "complete")
+
+y = unique(df$term)[y$order]'
+
+y = as.character(unique(df$term)[hclust(dist(as.matrix(gsea_hal[match(unique(df$term), gsea_hal$pathway),grepl("NES", colnames(gsea_hal))])))$order])
+
+library(ggplot2)
+library(stringr)
+
+f = function(el){paste(strwrap(str_replace_all(gsub("hal_", "", el), "_", " "), width = 35), collapse = "\n")}
+
+df$logp = -log10(df$padj)
+df$logp[df$logp>4] = 4
+
+y = gsub("HALLMARK_", "", y)
+df$term = factor(gsub("HALLMARK_", "", as.character(df$term)), levels = y)
+x = setNames(c("Chordoma\nvs NP", "Chordoma 1\nvs NP", "Chordoma 2\nvs NP", "Chordoma 3\nvs NP", "Chordoma 1\nvs Chordoma 3", "Chordoma 1\nvs Chordoma 2"),c("chordoma", "chordoma_1", "chordoma_2", "chordoma_3", "chordoma_1v_2", "chordoma_1v_3"))
+df$group = factor(x[df$group], levels = x)
+
+p = ggplot(data = df) +
+  geom_point(mapping = aes(x = group, y = term, color = NES, size = logp)) +
+  scale_y_discrete(breaks = y, labels = sapply(y,f)) +
+  scale_size(name = "Adj. p-value", limits = c(1,4), breaks = c(1:4), labels = 10^(-(1:4))) +
+  scale_color_gradientn(colours = c(rev(RColorBrewer::brewer.pal(8, "RdPu")), RColorBrewer::brewer.pal(8, "YlGn")), limits = (ceiling(10*max(abs(df$NES)))/10)*c(-1,1)) +
+  theme_bw()+
+  labs(title = "MSigDB: hallmark terms", subtitle = "Gene Set Enrichment Analysis",x = "", y = "")
+
+setwd(paste0(wd, "/gsea"))
+ggsave(plot = p, filename = "gsea_hal.png", width = 25, height = 25, units = "cm", dpi = 400)
+write.csv(gsea_hal, file = "gsea_hal.csv")
+```
+
+
+```{r}
+```
+
+```{r}
+#TRANSCRIPTION FACTOR
+```
+
+```{r}
+setwd(paste0(wd, "/dt"))
+tfl = read.csv("TFs.csv")
+```
+```{r}
+x = res[rownames(res) %in% tfl$ID,]
+x[order(abs(x$stat), decreasing = T),]
+```
+```{r}
+x = x[rowSums(as.matrix(x[,grepl("padj", colnames(x))])<0.1, na.rm = T) > 3,]
+#x = x[rowSums(as.matrix(x[,grepl("log2FoldChange", colnames(x))])>1, na.rm = T) > 0,]
+x = x[order(rowSums(as.matrix(x[,grepl("padj", colnames(x))])<0.1, na.rm = T), decreasing = T),]
+x
+dim(x)
+```
+
+```{r}
+key = setNames(c("", "_1", "_2", "_3", "_1v_3", "_1v_2"),c("Chordoma vs NP", "Chordoma 1 vs NP", "Chordoma 2 vs NP", "Chordoma 3 vs NP", "Chordoma 1 vs Chordoma 3", "Chordoma 1 vs Chordoma 2"))
+key
+```
+
+
+```{r}
+df = NULL
+for(el in key){
+  df = rbind(df, data.frame(logfc = x[,paste0("log2FoldChange", el)], padj = x[,paste0("padj", el)], group = rep(names(key)[key==el], times = dim(x)[1]), gene = x$hgnc))
+}
+df = df[!is.na(df$padj),]
+df = df[df$padj < 0.1,]
+df
+```
+
+```{r}
+y = x[,grepl("log2FoldChange", colnames(x))]
+rownames(y) = x$hgnc
+y = as.matrix(y)
+y = rownames(y)[hclust(dist(y))$order]
+```
+
+```{r}
+
+```
+
+
+```{r}
+library(ggplot2)
+df$logp = -log10(df$padj)
+df$logp[df$logp>4] = 4
+
+df$gene = factor(as.character(df$gene), levels = y)
+df$group = factor(gsub(" vs ", "\nvs ", df$group), levels = gsub(" vs ", "\nvs ", names(key)))
+
+p = ggplot(data = df) +
+  geom_point(mapping = aes(x = group, y = gene, color = logfc, size = logp)) +
+  #scale_y_discrete(breaks = y, labels = sapply(y,f)) +
+  scale_size(name = "Adj. p-value", limits = c(1,4), breaks = c(1:4), labels = 10^(-(1:4))) +
+  scale_color_gradientn(name = "log2FC", colours = rev(RColorBrewer::brewer.pal(13, "Spectral")),
+                        values = (((c((-1)*rev(quantile(abs(df$logfc))), -1e-5, 0, 1e-5, quantile(abs(df$logfc))))/max(abs(df$logfc)) + 1) /2),
+                        limits = c(-1,1)*max(abs(df$logfc))) +
+  theme_bw()+
+  labs(title = "Differentially expressed transcription factors",x = "", y = "") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+p
+```
+
+```{r}
+setwd(paste0(wd, "/res"))
+ggsave(p, filename = "TFs_deg.png", width = 6, height = 18, dpi = 400)
+```
+
+
+
+```{r}
+setwd(paste0(wd, "/dt"))
+trf = gmtPathways("transfac_cur.gmt")
+```
+
+
+
+```{r}
+Q = res
+Q = Q[order(abs(Q$log2FoldChange), decreasing = T),]
+Q = Q[!is.na(Q$hgnc),]
+Q = Q[!Q=="",]
+Q = Q[!duplicated(Q$hgnc),]
+Q = setNames(Q$log2FoldChange, Q$hgnc)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = trf, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+gsea_trf = as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_1), decreasing = T),]
+Q = Q[!is.na(Q$hgnc),]
+Q = Q[!Q=="",]
+Q = Q[!duplicated(Q$hgnc),]
+Q = setNames(Q$log2FoldChange_1, Q$hgnc)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = trf, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_1")
+gsea_trf = cbind(gsea_trf, fgseaRes[match(gsea_trf$pathway, fgseaRes$pathway_1),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_2), decreasing = T),]
+Q = Q[!is.na(Q$hgnc),]
+Q = Q[!Q=="",]
+Q = Q[!duplicated(Q$hgnc),]
+Q = setNames(Q$log2FoldChange_2, Q$hgnc)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = trf, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_2")
+gsea_trf = cbind(gsea_trf, fgseaRes[match(gsea_trf$pathway, fgseaRes$pathway_2),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_3), decreasing = T),]
+Q = Q[!is.na(Q$hgnc),]
+Q = Q[!Q=="",]
+Q = Q[!duplicated(Q$hgnc),]
+Q = setNames(Q$log2FoldChange_3, Q$hgnc)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = trf, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_3")
+gsea_trf = cbind(gsea_trf, fgseaRes[match(gsea_trf$pathway, fgseaRes$pathway_3),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_1v_2), decreasing = T),]
+Q = Q[!is.na(Q$hgnc),]
+Q = Q[!Q=="",]
+Q = Q[!duplicated(Q$hgnc),]
+Q = setNames(Q$log2FoldChange_1v_2, Q$hgnc)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = trf, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_1v_2")
+gsea_trf = cbind(gsea_trf, fgseaRes[match(gsea_trf$pathway, fgseaRes$pathway_1v_2),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_1v_3), decreasing = T),]
+Q = Q[!is.na(Q$hgnc),]
+Q = Q[!Q=="",]
+Q = Q[!duplicated(Q$hgnc),]
+Q = setNames(Q$log2FoldChange_1v_3, Q$hgnc)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = trf, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_1v_3")
+gsea_trf = cbind(gsea_trf, fgseaRes[match(gsea_trf$pathway, fgseaRes$pathway_1v_3),])
+
+print("Is it 0?")
+sum(!gsea_trf$pathway == gsea_trf$pathway_1)
+sum(!gsea_trf$pathway == gsea_trf$pathway_2)
+sum(!gsea_trf$pathway == gsea_trf$pathway_3)
+sum(!gsea_trf$pathway == gsea_trf$pathway_1_2)
+sum(!gsea_trf$pathway == gsea_trf$pathway_1_3)
+
+gsea_trf = gsea_trf[,!grepl("pathway_", colnames(gsea_trf))]
+gsea_trf = gsea_trf[,!grepl("size_", colnames(gsea_trf))]
+
+gsea_trf
+
+
+
+
+
+x = NULL
+x = c(x, gsea_trf[order(gsea_trf$NES, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_trf[order(gsea_trf$NES, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_trf[order(gsea_trf$NES_1, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_trf[order(gsea_trf$NES_1, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_trf[order(gsea_trf$NES_2, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_trf[order(gsea_trf$NES_2, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_trf[order(gsea_trf$NES_3, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_trf[order(gsea_trf$NES_3, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_trf[order(gsea_trf$NES_1v_2, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_trf[order(gsea_trf$NES_1v_2, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_trf[order(gsea_trf$NES_1v_3, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_trf[order(gsea_trf$NES_1v_3, decreasing = F),"pathway"][1:5])
+x = unique(x)
+
+x = gsea_trf[gsea_trf$pathway %in% x,]
+
+df = NULL
+for(el in key){
+  df = rbind(df, data.frame(NES = x[,paste0("NES", el)], padj = x[,paste0("padj", el)], group = rep(names(key)[key==el], times = dim(x)[1]), term = x$pathway))
+}
+df = df[!is.na(df$padj),]
+df = df[df$padj < 0.1,]
+
+y = x[,grepl("NES", colnames(x))]
+rownames(y) = x$pathway
+y = as.matrix(y)
+y = rownames(y)[hclust(dist(y))$order]
+
+library(ggplot2)
+library(stringr)
+
+f = function(el){paste(strwrap(str_replace_all(gsub("trf_", "", el), "_", " "), width = 35), collapse = "\n")}
+
+df$logp = -log10(df$padj)
+df$logp[df$logp>4] = 4
+
+df
+
+
+
+
+df$term = factor(as.character(df$term), levels = y)
+df$group = factor(gsub(" vs ", "\nvs ", df$group), levels = gsub(" vs ", "\nvs ", names(key)))
+
+p = ggplot(data = df) +
+  geom_point(mapping = aes(x = group, y = term, color = NES, size = logp)) +
+  #scale_y_discrete(breaks = y, labels = sapply(y,f)) +
+  scale_size(name = "Adj. p-value", limits = c(1,4), breaks = c(1:4), labels = 10^(-(1:4))) +
+  scale_color_gradientn(colours = c(rev(RColorBrewer::brewer.pal(8, "RdPu")), RColorBrewer::brewer.pal(8, "YlGn")), limits = (ceiling(10*max(abs(df$NES)))/10)*c(-1,1)) +
+  theme_bw()+
+  labs(title = "TRANSFAC Curated Transcription Factor Targets", subtitle = "Gene Set Enrichment Analysis",x = "", y = "")
+
+setwd(paste0(wd, "/gsea"))
+ggsave(plot = p, filename = "gsea_trf.png", width = 25, height = 25, units = "cm", dpi = 400)
+write.csv(gsea_trf, file = "gsea_trf.csv")
+```
+
+
+
+```{r}
+
+library(dorothea)
+library(viper)
+
+```
+
+
+
+
+```{r}
+regulons = dorothea_hs
+regulons
+regulons[regulons$tf == "HOXD3",]
+```
+```{r}
+x = HGNChelper::checkGeneSymbols(unique(regulons$tf))
+x[!x$Approved,]
+```
+```{r}
+x = HGNChelper::checkGeneSymbols(unique(regulons$target))
+x = x[!x$Approved,]
+x = x[!x$x %in% res$hgnc,]
+x = x[!is.na(x$Suggested.Symbol),]
+x = x[!x$Suggested.Symbol=="",]
+x
+```
+```{r}
+for(el in 1:length(x$Approved)){
+  regulons$target = gsub(x[el,"x"], x[el,"Suggested.Symbol"], regulons$target)
+}
+```
+
+
+```{r}
+x = setNames(res$hgnc, rownames(res))
+x["ENSG00000102760"] = "RGCC"
+
+x = x[!x==""]
+
+#x = x[x %in% c(regulons$tf, regulons$target)]
+
+#x
+```
+
+```{r}
+#unique(regulons$tf) %in% x
+```
+
+
+```{r}
+dim(regulons)
+regulons = regulons[(regulons$tf %in% x) & (regulons$target %in% x),]
+dim(regulons)
+```
+
+
+```{r}
+length(x)
+x = x[x %in% c(regulons$tf, regulons$target)]
+length(x)
+```
+```{r}
+regulons[regulons$tf == "HOXD3",]
+```
+
+
+```{r}
+dset = norm_c[rownames(norm_c) %in% names(x),]
+dim(dset)
+rownames(dset) = x[rownames(dset)]
+dset[1:10,1:10]
+```
+
+
+
+
+
+
+```{r}
+setwd(paste0(wd, "/res"))
+tf_activities <- run_viper(dset, regulons, 
+                           options =  list(method = "scale",
+                                           minsize = 4,
+                                           eset.filter = FALSE, cores = 1, 
+                                           verbose = FALSE))
+save(tf_activities, file = "viper.Rdata")
+```
+```{r}
+dim(tf_activities)
+```
+```{r}
+unique(regulons$tf)
+```
+
+```{r}
+library(limma)
+```
+```{r}
+dim(tf_activities)
+```
+
+
+
+```{r}
+fit = tf_activities[,cd[match(colnames(tf_activities), cd$sample),"source"] %in% c("NP","Ch")]
+fit = lmFit(object = fit, design = as.matrix(data.frame(row.names = colnames(fit), NP = rep(1, dim(fit)[2]), ChvsNP = ifelse(cd[match(colnames(fit), cd$sample),"source"] == "Ch", 1, 0))))
+fit <- eBayes(fit)
+res_tf_activities = topTable(fit, coef="ChvsNP", adjust="BH", number = dim(tf_activities)[1])
+res_tf_activities
+```
+
+
+```{r}
+res[match(rownames(res_tf_activities[order(res_tf_activities$adj.P.Val),]), res$hgnc),]
+```
+
+
+```{r}
+library(eulerr)
+```
+
+```{r}
+x = intersect(rownames(res_tf_activities), res$hgnc)
+x = data.frame(Gene_expression = res[match(x, res$hgnc),]$padj < 0.05,
+               Activity = res_tf_activities[match(x, rownames(res_tf_activities)),]$adj.P.Val < 0.05)
+x = x[!is.na(x$Gene_expression),]
+
+plot(euler(x, shape = "ellipse"), quantities = TRUE)
+```
+
+```{r}
+
+```
+
+
+```{r}
+cols = setNames(c(RColorBrewer::brewer.pal(12, "Paired")[c(2,4,6)], "black"), c(paste0("chordoma_", 1:3), "nucleus_pulposus"))
+
+el = "ETV4"
+ggplot(data = data.frame(gexp = dset[el,colnames(dset)], tf_act = tf_activities[el,colnames(dset)], clust = cd[match(colnames(dset), cd$sample),"methylation_cluster"]), aes(x = gexp, y = tf_act, color = clust)) + geom_point() + theme_bw() + scale_color_manual(name = "Group",values = cols, breaks = names(cols), labels = gsub("_", " ", names(cols))) + labs(title = el, x = "Scaled RNA expression level", y = "TF activity")
+```
+```{r}
+x = c(,,,)
+```
+
+
+
+
+```{r}
+for(el in paste0("chordoma_", 1:3)){
+  x = metprom[,spl[spl$type %in% c(el, "nucleus_pulposus"),"Sample_Name"]]
+  x = lmFit(object = x, design = as.matrix(data.frame(row.names = colnames(x), NP = rep(1, dim(x)[2]), ChvsNP = ifelse(spl[match(colnames(x), spl$Sample_Name),"source"] == "chordoma", 1, 0))))
+  x <- eBayes(x)
+  x = topTable(x, coef="ChvsNP", adjust="BH", number = dim(metprom)[1])
+  x = x[match(rownames(res_metprom), rownames(x)),c("logFC", "t", "P.Value", "adj.P.Val")]
+  colnames(x) = paste0(el, "_", colnames(x))
+  res_metprom = cbind(res_metprom, x)
+}
+
+x = metprom[,spl[spl$type %in% c("chordoma_1", "chordoma_2"),"Sample_Name"]]
+
+
+x = lmFit(object = x, design = as.matrix(data.frame(row.names = colnames(x), Ref = rep(1, dim(x)[2]), RefvsT = ifelse(spl[match(colnames(x), spl$Sample_Name),"type"] == "chordoma_2", 1, 0))))
+
+x <- eBayes(x)
+
+x = topTable(x, coef="RefvsT", adjust="BH", number = dim(metprom)[1])
+
+  x = x[match(rownames(res_metprom), rownames(x)),c("logFC", "t", "P.Value", "adj.P.Val")]
+  colnames(x) = paste0("chordoma_1vschordoma_2", "_", colnames(x))
+  res_metprom = cbind(res_metprom, x)
+
+x = metprom[,spl[spl$type %in% c("chordoma_1", "chordoma_3"),"Sample_Name"]]
+
+
+x = lmFit(object = x, design = as.matrix(data.frame(row.names = colnames(x), Ref = rep(1, dim(x)[2]), RefvsT = ifelse(spl[match(colnames(x), spl$Sample_Name),"type"] == "chordoma_3", 1, 0))))
+
+x <- eBayes(x)
+
+x = topTable(x, coef="RefvsT", adjust="BH", number = dim(metprom)[1])
+
+  x = x[match(rownames(res_metprom), rownames(x)),c("logFC", "t", "P.Value", "adj.P.Val")]
+  colnames(x) = paste0("chordoma_1vschordoma_3", "_", colnames(x))
+  res_metprom = cbind(res_metprom, x)
+  
+res_metprom
+```
+
+
+```{r}
+setwd(paste0(wd, "/res"))
+save(res_metprom, file = "res_metprom.Rdata")
+```
+
+
+```{r}
+library(mclust)
+y = Mclust(scale(log_c)[tfl$ID [ tfl$ID %in% rownames(log_c)],grepl("_", colnames(log_c))])
+y
+```
+```{r}
+plot(y$BIC)
+```
+
+```{r}
+X = norm_c[rownames(norm_c) %in% tfl$ID,]
+
+cols = setNames(RColorBrewer::brewer.pal(12, "Paired")[c(2,4,6,8,10,11,12)], c(paste0("chordoma_", 1:4), "somatotropinoma", "nucleus_pulposus", "chordoma_cell_line"))
+
+ha = HeatmapAnnotation(
+    #PDE4DIP = df$PDE4DIP,
+    #CRLF2 = df$CRLF2,
+    #MUC3A = df$MUC3A,
+    `IDH status` = ifelse(cd[match(colnames(X), cd$sample),]$idh == "mut", "IDH1R132H", "normal"),
+    `CDKN2A/B` = ifelse(cd[match(colnames(X), cd$sample),]$cdkn == "loh", "LOH", "normal"),
+    `Lymphocyte infiltration` = cd[match(colnames(X), cd$sample),]$ly,
+    `Copy number %` = cd[match(colnames(X), cd$sample),]$cnv,
+    `Mutation load` = cd[match(colnames(X), cd$sample),]$mut,
+    Sex = cd[match(colnames(X), cd$sample),]$sex,
+    Age = cd[match(colnames(X), cd$sample),]$age,
+    `Methylation cluster` = cd[match(colnames(X), cd$sample),"methylation_cluster"],
+    `RNA cluster` = cd[match(colnames(X), cd$sample),"rna_cluster"],
+    col = list(`IDH status` = c("IDH1R132H" = "aquamarine4", "normal" = "white"),
+               `CDKN2A/B` = c("LOH" = "bisque4", "normal" = "white"),
+               `Lymphocyte infiltration` = c("low" = "white", "high" = "darkslateblue"),
+               Sex = c("male" = "lightskyblue", "female" = "lightpink"),
+               `Copy number %` = circlize::colorRamp2(c(quantile(cd$cnv, na.rm = T, seq(0,1,0.125)),100), c("white", rev(viridis::rocket(8)), "black")),
+               `Mutation load` = circlize::colorRamp2(c(0,quantile(dropNA(cd$mut))), c("white", rev(viridis::rocket(5)))),
+               Age = circlize::colorRamp2(c(0,10*(2:8),100), c("white", rev(viridis::rocket(7)), "black")),
+               `RNA cluster` = setNames(RColorBrewer::brewer.pal(5, "Set2"), c(paste0("chordoma_", toupper(letters[1:4])), "nucleus_pulposus")),
+               `Methylation cluster` = cols)
+)
+
+ra = as.data.frame(-log10(as.matrix(res[rownames(X),grepl("padj", colnames(res))])))
+colnames(ra) = names(key)
+ra = rowAnnotation(df = ra, col = setNames(lapply(colnames(ra), function(el){circlize::colorRamp2(c(0,1-1e-5,1,-log10(0.05),2,4,max(ra, na.rm = T)), c("white", "white", "blue", "cyan","green", "yellow", "orange"))}), colnames(ra)), show_legend = c(T,rep(F,length(colnames(ra))-1)))
+
+ht = Heatmap(X,
+             name = "Scaled RNA\n expression level",
+        show_row_names = F, show_row_dend = F,
+        left_annotation = ra,
+        clustering_method_rows = "ward.D", clustering_distance_rows = "manhattan",
+        clustering_method_columns = "ward.D", clustering_distance_columns = "manhattan",
+        row_split = tfl[match(rownames(X), tfl$ID),"cluster"],
+        column_split = cd[colnames(X),"methylation_cluster"],
+        show_column_names = F,
+        top_annotation = ha,
+        col = circlize::colorRamp2(quantile(X[,grepl("_", colnames(X))], probs = seq(0, 1, 1/15)), c(rev(RColorBrewer::brewer.pal(8, "RdPu")), RColorBrewer::brewer.pal(8, "YlGn"))))
+
+png(filename = "ht_tfs.png", width = 30, height = 40, units = "cm", res = 400)
+draw(ht, heatmap_legend_side = "right", annotation_legend_side = "right", merge_legend = TRUE)
+dev.off()
+
+```
+
+```{r}
+cd[colnames(X),"methylation_cluster"]
+```
+```{r}
+max(ra, na.rm = T)
+```
+
+```{r}
+-log10(0.05)
+```
+
+
+```{r}
+
+```
+```{r}
+
+```
+
+
+
+```{r}
+cols = setNames(RColorBrewer::brewer.pal(12, "Paired")[c(2,4,6,8,10,11,12)], c(paste0("chordoma_", 1:4), "somatotropinoma", "nucleus_pulposus", "chordoma_cell_line"))
+
+ha = HeatmapAnnotation(
+    #PDE4DIP = df$PDE4DIP,
+    #CRLF2 = df$CRLF2,
+    #MUC3A = df$MUC3A,
+    `IDH status` = ifelse(cd[match(colnames(norm_c), cd$sample),"idh"] == "mut", "IDH1R132H", "normal"),
+    `CDKN2A/B` = ifelse(cd[match(colnames(norm_c), cd$sample),"cdkn"] == "loh", "LOH", "normal"),
+    `Methylation cluster` = cd[match(colnames(norm_c), cd$sample),"methylation_cluster"],
+    `RNA cluster` = cd[match(colnames(norm_c), cd$sample),"rna_cluster"],
+    col = list(`IDH status` = c("IDH1R132H" = "aquamarine4", "normal" = "white"),
+               `CDKN2A/B` = c("LOH" = "bisque4", "normal" = "white"),
+               `Methylation cluster` = cols,
+               `RNA cluster` = setNames(RColorBrewer::brewer.pal(5, "Set2"), c(paste0("chordoma_", toupper(letters[1:4])), "nucleus_pulposus")))
+)
+
+setwd(paste0(wd, "/gsea"))
+x = res[dropNA(match(go$GOCC_T_CELL_RECEPTOR_COMPLEX, res$entrez)),]
+x = norm_c[match(rownames(x[order(x$stat, decreasing = T),]), rownames(norm_c)),]
+rownames(x) = trl[match(rownames(x), trl$ensembl_gene_id),"hgnc_symbol"]
+
+ra = rowAnnotation(Chordoma = ifelse(res$padj[match(rownames(x), res$hgnc)] > 0.01, "ns", ifelse(res$stat[match(rownames(x), res$hgnc)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_1 = ifelse(res$padj_1[match(rownames(x), res$hgnc)] > 0.01, "ns", ifelse(res$stat_1[match(rownames(x), res$hgnc)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_2 = ifelse(res$padj_2[match(rownames(x), res$hgnc)] > 0.01, "ns", ifelse(res$stat_2[match(rownames(x), res$hgnc)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_3 = ifelse(res$padj_3[match(rownames(x), res$hgnc)] > 0.01, "ns", ifelse(res$stat_3[match(rownames(x), res$hgnc)] > 0, "Upregulated", "Downregulated")),
+              show_legend = c(T,F,F,F,F),
+              col = list(Chordoma = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_1 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_2 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_3 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"))
+)
+
+ht = Heatmap(x,
+        clustering_method_columns = "complete", clustering_distance_columns = "euclidean",
+        cluster_rows = F,
+        column_split = factor(cd[match(colnames(x), cd$sample), "methylation_cluster"], levels = c("chordoma_1", "chordoma_3", "chordoma_4", "chordoma_2", "nucleus_pulposus")),
+        column_title = rep("", times = 5),
+        top_annotation = ha,
+        right_annotation = ra,
+        col = circlize::colorRamp2(quantile(x, probs = seq(0, 1, 1/15)), c(rev(RColorBrewer::brewer.pal(8, "RdPu")), RColorBrewer::brewer.pal(8, "YlGn"))))
+
+png(filename = "ht_tcr_go.png", width = 30, height = 20, units = "cm", res = 400)
+draw(ht, heatmap_legend_side = "bottom", annotation_legend_side = "bottom", merge_legend = T, column_title = "GO: TCR complex")
+dev.off()
+
+```
+
+
+```{r}
+setwd(paste0(wd, "/gsea"))
+x = res[dropNA(match(reactome$REACTOME_PD_1_SIGNALING, res$entrez)),]
+x = norm_c[match(rownames(x[order(x$stat, decreasing = T),]), rownames(norm_c)),]
+rownames(x) = trl[match(rownames(x), trl$ensembl_gene_id),"hgnc_symbol"]
+
+ra = rowAnnotation(Chordoma = ifelse(res$padj[match(rownames(x), res$hgnc)] > 0.01, "ns", ifelse(res$stat[match(rownames(x), res$hgnc)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_1 = ifelse(res$padj_1[match(rownames(x), res$hgnc)] > 0.01, "ns", ifelse(res$stat_1[match(rownames(x), res$hgnc)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_2 = ifelse(res$padj_2[match(rownames(x), res$hgnc)] > 0.01, "ns", ifelse(res$stat_2[match(rownames(x), res$hgnc)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_3 = ifelse(res$padj_3[match(rownames(x), res$hgnc)] > 0.01, "ns", ifelse(res$stat_3[match(rownames(x), res$hgnc)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_4 = ifelse(res$padj_4[match(rownames(x), res$hgnc)] > 0.01, "ns", ifelse(res$stat_4[match(rownames(x), res$hgnc)] > 0, "Upregulated", "Downregulated")),
+              show_legend = c(T,F,F,F,F),
+              col = list(Chordoma = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_1 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_2 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_3 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_4 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"))
+)
+
+ht = Heatmap(x,
+        clustering_method_columns = "complete", clustering_distance_columns = "euclidean",
+        cluster_rows = F,
+        column_split = factor(cd[match(colnames(x), cd$sample), "methylation_cluster"], levels = c("chordoma_1", "chordoma_3", "chordoma_4", "chordoma_2", "nucleus_pulposus")),
+        column_title = rep("", times = 5),
+        top_annotation = ha,
+        right_annotation = ra,
+        col = circlize::colorRamp2(quantile(x, probs = seq(0, 1, 1/15)), c(rev(RColorBrewer::brewer.pal(8, "RdPu")), RColorBrewer::brewer.pal(8, "YlGn"))))
+
+png(filename = "ht_pd1_reactome.png", width = 30, height = 20, units = "cm", res = 400)
+draw(ht, heatmap_legend_side = "bottom", annotation_legend_side = "bottom", merge_legend = T, column_title = "Reactome: PD1 signalling")
+dev.off()
+```
+
+```{r}
+setwd(paste0(wd, "/gsea"))
+x = res[dropNA(match(reactome$REACTOME_DNA_REPLICATION, res$entrez)),]
+x = norm_c[match(rownames(x[order(x$stat, decreasing = T),]), rownames(norm_c)),]
+rownames(x) = trl[match(rownames(x), trl$ensembl_gene_id),"hgnc_symbol"]
+
+ra = rowAnnotation(Chordoma = ifelse(res$padj[match(rownames(x), res$hgnc)] > 0.01, "ns", ifelse(res$stat[match(rownames(x), res$hgnc)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_1 = ifelse(res$padj_1[match(rownames(x), res$hgnc)] > 0.01, "ns", ifelse(res$stat_1[match(rownames(x), res$hgnc)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_2 = ifelse(res$padj_2[match(rownames(x), res$hgnc)] > 0.01, "ns", ifelse(res$stat_2[match(rownames(x), res$hgnc)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_3 = ifelse(res$padj_3[match(rownames(x), res$hgnc)] > 0.01, "ns", ifelse(res$stat_3[match(rownames(x), res$hgnc)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_4 = ifelse(res$padj_4[match(rownames(x), res$hgnc)] > 0.01, "ns", ifelse(res$stat_4[match(rownames(x), res$hgnc)] > 0, "Upregulated", "Downregulated")),
+              show_legend = c(T,F,F,F,F),
+              col = list(Chordoma = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_1 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_2 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_3 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_4 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"))
+)
+
+ht = Heatmap(x,
+        clustering_method_columns = "complete", clustering_distance_columns = "euclidean",
+        cluster_rows = F,
+        column_split = factor(cd[match(colnames(x), cd$sample), "methylation_cluster"], levels = c("chordoma_1", "chordoma_3", "chordoma_4", "chordoma_2", "nucleus_pulposus")),
+        column_title = rep("", times = 5),
+        top_annotation = ha,
+        right_annotation = ra,
+        col = circlize::colorRamp2(quantile(x, probs = seq(0, 1, 1/15)), c(rev(RColorBrewer::brewer.pal(8, "RdPu")), RColorBrewer::brewer.pal(8, "YlGn"))))
+
+png(filename = "ht_dnar_reactome.png", width = 30, height = 60, units = "cm", res = 400)
+draw(ht, heatmap_legend_side = "bottom", annotation_legend_side = "bottom", merge_legend = T, column_title = "Reactome: DNA replication")
+dev.off()
+```
+
+
+```{r}
+setwd(paste0(wd, "/gsea"))
+x = res[dropNA(match(reactome$REACTOME_TCR_SIGNALING, res$entrez)),]
+x = norm_c[match(rownames(x[order(x$stat, decreasing = T),]), rownames(norm_c)),]
+
+ra = rowAnnotation(Chordoma = ifelse(res$padj[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_1 = ifelse(res$padj_1[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat_1[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_2 = ifelse(res$padj_2[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat_2[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_3 = ifelse(res$padj_3[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat_3[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_4 = ifelse(res$padj_4[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat_4[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              show_legend = c(T,F,F,F,F),
+              col = list(Chordoma = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_1 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_2 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_3 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_4 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"))
+)
+
+rownames(x) = trl[match(rownames(x), trl$ensembl_gene_id),"hgnc_symbol"]
+
+
+
+ht = Heatmap(x,
+        clustering_method_columns = "complete", clustering_distance_columns = "euclidean",
+        cluster_rows = F,
+        column_split = factor(cd[match(colnames(x), cd$sample), "methylation_cluster"], levels = c("chordoma_1", "chordoma_3", "chordoma_4", "chordoma_2", "nucleus_pulposus")),
+        column_title = rep("", times = 5),
+        top_annotation = ha,
+        right_annotation = ra,
+        col = circlize::colorRamp2(quantile(x, probs = seq(0, 1, 1/15)), c(rev(RColorBrewer::brewer.pal(8, "RdPu")), RColorBrewer::brewer.pal(8, "YlGn"))))
+
+png(filename = "ht_tcr_reactome.png", width = 30, height = 60, units = "cm", res = 400)
+draw(ht, heatmap_legend_side = "bottom", annotation_legend_side = "bottom", merge_legend = T, column_title = "Reactome: T-cell receptor signalling")
+dev.off()
+```
+
+
+```{r}
+setwd(paste0(wd, "/gsea"))
+x = res[dropNA(match(reactome$REACTOME_CELL_CYCLE_CHECKPOINTS, res$entrez)),]
+x = norm_c[match(rownames(x[order(x$stat, decreasing = T),]), rownames(norm_c)),]
+
+ra = rowAnnotation(Chordoma = ifelse(res$padj[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_1 = ifelse(res$padj_1[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat_1[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_2 = ifelse(res$padj_2[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat_2[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_3 = ifelse(res$padj_3[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat_3[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_4 = ifelse(res$padj_4[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat_4[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              show_legend = c(T,F,F,F,F),
+              col = list(Chordoma = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_1 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_2 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_3 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_4 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"))
+)
+
+rownames(x) = trl[match(rownames(x), trl$ensembl_gene_id),"hgnc_symbol"]
+
+
+
+ht = Heatmap(x,
+        clustering_method_columns = "complete", clustering_distance_columns = "euclidean",
+        cluster_rows = F,
+        column_split = factor(cd[match(colnames(x), cd$sample), "methylation_cluster"], levels = c("chordoma_1", "chordoma_3", "chordoma_4", "chordoma_2", "nucleus_pulposus")),
+        column_title = rep("", times = 5),
+        top_annotation = ha,
+        right_annotation = ra,
+        col = circlize::colorRamp2(quantile(x, probs = seq(0, 1, 1/15)), c(rev(RColorBrewer::brewer.pal(8, "RdPu")), RColorBrewer::brewer.pal(8, "YlGn"))))
+
+png(filename = "ht_cc_reactome.png", width = 30, height = 80, units = "cm", res = 400)
+draw(ht, heatmap_legend_side = "bottom", annotation_legend_side = "bottom", merge_legend = T, column_title = "Reactome: Cell cycle checkpoints")
+dev.off()
+```
+
+```{r}
+ifelse(res$padj[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated"))
+```
+
+
+```{r}
+setwd(paste0(wd, "/gsea"))
+x = res[dropNA(match(reactome$REACTOME_IMMUNOREGULATORY_INTERACTIONS_BETWEEN_A_LYMPHOID_AND_A_NON_LYMPHOID_CELL, res$entrez)),]
+x = norm_c[match(rownames(x[order(x$stat, decreasing = T),]), rownames(norm_c)),]
+
+ra = rowAnnotation(Chordoma = ifelse(res$padj[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_1 = ifelse(res$padj_1[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat_1[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_2 = ifelse(res$padj_2[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat_2[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_3 = ifelse(res$padj_3[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat_3[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_4 = ifelse(res$padj_4[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat_4[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              show_legend = c(T,F,F,F,F),
+              col = list(Chordoma = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_1 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_2 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_3 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_4 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"))
+)
+
+rownames(x) = trl[match(rownames(x), trl$ensembl_gene_id),"hgnc_symbol"]
+
+
+
+ht = Heatmap(x,
+        clustering_method_columns = "complete", clustering_distance_columns = "euclidean",
+        cluster_rows = F,
+        column_split = factor(cd[match(colnames(x), cd$sample), "methylation_cluster"], levels = c("chordoma_1", "chordoma_3", "chordoma_4", "chordoma_2", "nucleus_pulposus")),
+        column_title = rep("", times = 5),
+        top_annotation = ha,
+        right_annotation = ra,
+        col = circlize::colorRamp2(quantile(x, probs = seq(0, 1, 1/15)), c(rev(RColorBrewer::brewer.pal(8, "RdPu")), RColorBrewer::brewer.pal(8, "YlGn"))))
+
+png(filename = "ht_lnl_reactome.png", width = 30, height = 60, units = "cm", res = 400)
+draw(ht, heatmap_legend_side = "bottom", annotation_legend_side = "bottom", merge_legend = T, column_title = "Reactome: Immunomodulatory interactions between lymphoid and non-lymphoid cells")
+dev.off()
+```
+
+```{r}
+setwd(paste0(wd, "/gsea"))
+x = res[dropNA(match(reactome$REACTOME_STABILIZATION_OF_P53, res$entrez)),]
+x = norm_c[match(rownames(x[order(x$stat, decreasing = T),]), rownames(norm_c)),]
+
+ra = rowAnnotation(Chordoma = ifelse(res$padj[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_1 = ifelse(res$padj_1[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat_1[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_2 = ifelse(res$padj_2[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat_2[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_3 = ifelse(res$padj_3[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat_3[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_4 = ifelse(res$padj_4[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat_4[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              show_legend = c(T,F,F,F,F),
+              col = list(Chordoma = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_1 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_2 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_3 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_4 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"))
+)
+
+rownames(x) = trl[match(rownames(x), trl$ensembl_gene_id),"hgnc_symbol"]
+
+
+
+ht = Heatmap(x,
+        clustering_method_columns = "complete", clustering_distance_columns = "euclidean",
+        cluster_rows = F,
+        column_split = factor(cd[match(colnames(x), cd$sample), "methylation_cluster"], levels = c("chordoma_1", "chordoma_3", "chordoma_4", "chordoma_2", "nucleus_pulposus")),
+        column_title = rep("", times = 5),
+        top_annotation = ha,
+        right_annotation = ra,
+        col = circlize::colorRamp2(quantile(x, probs = seq(0, 1, 1/15)), c(rev(RColorBrewer::brewer.pal(8, "RdPu")), RColorBrewer::brewer.pal(8, "YlGn"))))
+
+png(filename = "ht_p53_reactome.png", width = 30, height = 40, units = "cm", res = 400)
+draw(ht, heatmap_legend_side = "bottom", annotation_legend_side = "bottom", merge_legend = T, column_title = "Reactome: Stabilization of p53")
+dev.off()
+```
+```{r}
+setwd(paste0(wd, "/gsea"))
+x = res[dropNA(match(reactome$REACTOME_GENERATION_OF_SECOND_MESSENGER_MOLECULES, res$entrez)),]
+x = norm_c[match(rownames(x[order(x$stat, decreasing = T),]), rownames(norm_c)),]
+
+ra = rowAnnotation(Chordoma = ifelse(res$padj[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_1 = ifelse(res$padj_1[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat_1[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_2 = ifelse(res$padj_2[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat_2[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_3 = ifelse(res$padj_3[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat_3[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_4 = ifelse(res$padj_4[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat_4[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              show_legend = c(T,F,F,F,F),
+              col = list(Chordoma = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_1 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_2 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_3 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_4 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"))
+)
+
+rownames(x) = trl[match(rownames(x), trl$ensembl_gene_id),"hgnc_symbol"]
+
+
+
+ht = Heatmap(x,
+        clustering_method_columns = "complete", clustering_distance_columns = "euclidean",
+        cluster_rows = F,
+        column_split = factor(cd[match(colnames(x), cd$sample), "methylation_cluster"], levels = c("chordoma_1", "chordoma_3", "chordoma_4", "chordoma_2", "nucleus_pulposus")),
+        column_title = rep("", times = 5),
+        top_annotation = ha,
+        right_annotation = ra,
+        col = circlize::colorRamp2(quantile(x, probs = seq(0, 1, 1/15)), c(rev(RColorBrewer::brewer.pal(8, "RdPu")), RColorBrewer::brewer.pal(8, "YlGn"))))
+
+png(filename = "ht_2mm_reactome.png", width = 30, height = 30, units = "cm", res = 400)
+draw(ht, heatmap_legend_side = "bottom", annotation_legend_side = "bottom", merge_legend = T, column_title = "Reactome: Generation of second messanger molecules")
+dev.off()
+```
+
+```{r}
+setwd(paste0(wd, "/gsea"))
+x = res[dropNA(match(reactome$REACTOME_NUCLEAR_EVENTS_KINASE_AND_TRANSCRIPTION_FACTOR_ACTIVATION, res$entrez)),]
+x = norm_c[match(rownames(x[order(x$stat, decreasing = T),]), rownames(norm_c)),]
+
+ra = rowAnnotation(Chordoma = ifelse(res$padj[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_1 = ifelse(res$padj_1[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat_1[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_2 = ifelse(res$padj_2[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat_2[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_3 = ifelse(res$padj_3[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat_3[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              Chordoma_4 = ifelse(res$padj_4[match(rownames(x), res$entrez)] > 0.01, "ns", ifelse(res$stat_4[match(rownames(x), res$entrez)] > 0, "Upregulated", "Downregulated")),
+              show_legend = c(T,F,F,F,F),
+              col = list(Chordoma = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_1 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_2 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_3 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"),
+                         Chordoma_4 = c("Upregulated" = "cadetblue", "ns" = "white", "Downregulated" = "maroon"))
+)
+
+rownames(x) = trl[match(rownames(x), trl$ensembl_gene_id),"hgnc_symbol"]
+
+
+
+ht = Heatmap(x,
+        clustering_method_columns = "complete", clustering_distance_columns = "euclidean",
+        cluster_rows = F,
+        column_split = factor(cd[match(colnames(x), cd$sample), "methylation_cluster"], levels = c("chordoma_1", "chordoma_3", "chordoma_4", "chordoma_2", "nucleus_pulposus")),
+        column_title = rep("", times = 5),
+        top_annotation = ha,
+        right_annotation = ra,
+        col = circlize::colorRamp2(quantile(x, probs = seq(0, 1, 1/15)), c(rev(RColorBrewer::brewer.pal(8, "RdPu")), RColorBrewer::brewer.pal(8, "YlGn"))))
+
+png(filename = "ht_nem_reactome.png", width = 30, height = 30, units = "cm", res = 400)
+draw(ht, heatmap_legend_side = "bottom", annotation_legend_side = "bottom", merge_legend = T, column_title = "Reactome: Nuclear event kinases")
+dev.off()
+```
+
+
+
+
+
+```{r}
+kegg = c2[grepl("KEGG", names(c2))]
+length(kegg)
+```
+
+
+
+
+
+```{r}
+Q = res
+Q = Q[order(abs(Q$log2FoldChange), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = kegg, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+gsea_kegg = as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_1), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_1, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = kegg, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_1")
+gsea_kegg = cbind(gsea_kegg, fgseaRes[match(gsea_kegg$pathway, fgseaRes$pathway_1),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_2), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_2, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = kegg, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_2")
+gsea_kegg = cbind(gsea_kegg, fgseaRes[match(gsea_kegg$pathway, fgseaRes$pathway_2),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_3), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_3, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = kegg, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_3")
+gsea_kegg = cbind(gsea_kegg, fgseaRes[match(gsea_kegg$pathway, fgseaRes$pathway_3),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_1v_2), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_1v_2, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = kegg, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_1v_2")
+gsea_kegg = cbind(gsea_kegg, fgseaRes[match(gsea_kegg$pathway, fgseaRes$pathway_1v_2),])
+
+Q = res
+Q = Q[order(abs(Q$log2FoldChange_1v_3), decreasing = T),]
+Q = Q[!is.na(Q$entrez),]
+Q = Q[!duplicated(Q$entrez),]
+Q = setNames(Q$log2FoldChange_1v_3, Q$entrez)
+Q = Q[!is.na(Q)]
+fgseaRes <- fgsea(pathways = kegg, stats = Q, eps = 1e-30, minSize  = 10, maxSize  = 1000)
+fgseaRes <- as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+colnames(fgseaRes) = paste0(colnames(fgseaRes), "_1v_3")
+gsea_kegg = cbind(gsea_kegg, fgseaRes[match(gsea_kegg$pathway, fgseaRes$pathway_1v_3),])
+
+print("Is it 0?")
+sum(!gsea_kegg$pathway == gsea_kegg$pathway_1)
+sum(!gsea_kegg$pathway == gsea_kegg$pathway_2)
+sum(!gsea_kegg$pathway == gsea_kegg$pathway_3)
+sum(!gsea_kegg$pathway == gsea_kegg$pathway_1_2)
+sum(!gsea_kegg$pathway == gsea_kegg$pathway_1_3)
+
+gsea_kegg = gsea_kegg[,!grepl("pathway_", colnames(gsea_kegg))]
+gsea_kegg = gsea_kegg[,!grepl("size_", colnames(gsea_kegg))]
+
+gsea_kegg
+
+
+
+x = NULL
+x = c(x, gsea_kegg[order(gsea_kegg$NES, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_kegg[order(gsea_kegg$NES, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_kegg[order(gsea_kegg$NES_1, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_kegg[order(gsea_kegg$NES_1, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_kegg[order(gsea_kegg$NES_2, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_kegg[order(gsea_kegg$NES_2, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_kegg[order(gsea_kegg$NES_3, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_kegg[order(gsea_kegg$NES_3, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_kegg[order(gsea_kegg$NES_1v_2, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_kegg[order(gsea_kegg$NES_1v_2, decreasing = F),"pathway"][1:5])
+x = c(x, gsea_kegg[order(gsea_kegg$NES_1v_3, decreasing = T),"pathway"][1:5])
+x = c(x, gsea_kegg[order(gsea_kegg$NES_1v_3, decreasing = F),"pathway"][1:5])
+x = unique(x)
+df = data.frame(term = rep(x, 6), padj = 1, NES = 0, group = unlist(lapply(paste0("chordoma", c("", paste0("_",1:3), "_1v_2", "_1v_3")), rep, times = length(x))))
+
+for(el in 1:length(df$term)){
+  df[el, "NES"] = gsea_kegg[match(df[el, "term"], gsea_kegg$pathway),paste0("NES", gsub("chordoma", "", df[el,"group"]))]
+  df[el, "padj"] = gsea_kegg[match(df[el, "term"], gsea_kegg$pathway),paste0("padj", gsub("chordoma", "", df[el,"group"]))]
+}
+
+df = df[df$term %in% names(tapply(df$padj, df$term, min)[tapply(df$padj, df$term, min) <0.05]),]
+
+
+y = matrix(0, ncol = length(unique(df$term)), nrow = length(unique(unlist(kegg[unique(df$term)]))), dimnames = list(rn = unique(unlist(kegg[unique(df$term)])), cn = unique(df$term)))
+
+for(el in unique(df$term)){
+  y[kegg[[el]],el] = 1
+}
+
+y = hclust(dist(flip(y), method = "binary"), method = "complete")
+
+y = unique(df$term)[y$order]
+
+library(ggplot2)
+library(stringr)
+
+f = function(el){paste(strwrap(str_replace_all(gsub("kegg_", "", el), "_", " "), width = 35), collapse = "\n")}
+
+df$logp = -log10(df$padj)
+df$logp[df$logp>4] = 4
+
+df$term = factor(as.character(df$term), levels = y)
+df$group = factor(df$group, levels = c("chordoma", "chordoma_1", "chordoma_2", "chordoma_3", "chordoma_1v_2", "chordoma_1v_3"))
+
+p = ggplot(data = df) +
+  geom_point(mapping = aes(x = group, y = term, color = NES, size = logp)) +
+  scale_y_discrete(breaks = y, labels = sapply(y,f)) +
+  scale_size(name = "Adj. p-value", limits = c(0,4), breaks = c(0:4), labels = 10^(-(0:4))) +
+  scale_color_gradientn(colours = c(rev(RColorBrewer::brewer.pal(8, "RdPu")), RColorBrewer::brewer.pal(8, "YlGn")), limits = (ceiling(10*max(abs(df$NES)))/10)*c(-1,1)) +
+  theme_bw()+
+  labs(title = "Kyoto Encyclopedia of Genes and Genomes", subtitle = "Gene Set Enrichment Analysis",x = "vs nucleus pulposus", y = "")
+
+setwd(paste0(wd, "/gsea"))
+ggsave(plot = p, filename = "gsea_kegg.png", width = 25, height = 25, units = "cm", dpi = 400)
+write.csv(gsea_kegg, file = "gsea_kegg.csv")
+```
+
+```{r}
+scale(log_c[1:10,1:5])
+```
+
+
+
+
+
+
+
+
+```{r}
+library(pathview)
+```
+
+```{r}
+setwd(paste0(wd, "/gsea"))
+Q = res$stat
+names(Q) = trl[match(rownames(res), trl$ensembl_gene_id),"entrezgene_id"]
+pv.out <- pathview(gene.data = Q, pathway.id = c("04110", "03040", "00190", "04660"), species = "hsa", out.suffix = "chordoma_vs_np", na.col = "gray", mid = "#FFFFE5", low = "maroon1", high = "mediumspringgreen")
+```
+
+```{r}
+#TRANSCRIPTS
+```
+
+
+```{r}
+library(DTUrtle)
+```
+```{r}
+s = c("11_18", "16_20", "18_16", "19_19", "20_17", "24_18", "26_15", "26_16", "28_20", "31_14", "31_20", "32_14", "35_17", "37_19", "38_17", "39_18", "40_18", "45_17",  "50_15", "50_19", "53_18", "54_15", "55_19",  "62_15", "67_11", "68_18",  "74_19", "81_15", "92_15", "5_16","4_19","6_16","7_19", "9_20", "NP4", "NP7", "NP8", "NP9")
+
+s
+```
+
+```{r}
+files = sapply(s, function(el){
+  paste0("D:/Files/Molecular_data/chordoma_RNAseq/output/", el, "/abundance.h5")
+})
+txi.kallisto <- tximport(files, type = "kallisto", txOut = T, txIn = T)
+```
+
+
+
+
+
+
+
+```{r}
+counts = txi.kallisto$counts
+
+x = rownames(counts)
+tr.key = data.frame(
+  rn = x
+)
+
+tr.key = cbind(tr.key, trl[match(substr(x, 1, 15), trl$ensembl_transcript_id),])
+
+rownames(tr.key) = tr.key$rn
+#rownames(counts) = tr.key$transcriptId
+
+#tr.key$ensg = sapply(strsplit(tr.key$geneId, "\\."), function(x){x[1]})
+
+#tr.key$rn = x
+
+#setwd(paste0(wd, "/dt"))
+#load(file = "transcripts_key.Rdata")
+
+tr.key
+```
+
+```{r}
+
+```
+
+
+
+```{r}
+dim(counts)
+counts = counts[tr.key$rn[tr.key$gene_biotype %in% c("protein_coding", unique(tr.key$gene_biotype)[grepl("_gene", unique(tr.key$gene_biotype))])],]
+dim(counts)
+```
+
+```{r}
+
+```
+
+```{r}
+dim(tr.key)
+tr.key = tr.key[tr.key$gene_biotype %in% c("protein_coding", unique(tr.key$gene_biotype)[grepl("_gene", unique(tr.key$gene_biotype))]),]
+dim(tr.key)
+```
+
+
+
+
+
+
+
+
+
+```{r}
+
+cd = data.frame(source = ifelse(grepl("NP", colnames(counts)), "NP", "Ch"),
+                sample = colnames(counts))
+
+x = read.csv("spl_clust.csv")
+
+
+
+cd$methylation_cluster = x[match(cd$sample, gsub("/", "_", x$Sample_Name)),"type"]
+
+cd$methylation_cluster[cd$source == "NP"] = "nucleus_pulposus"
+
+cd$source[cd$sample %in% c("MUG_CC1", "UM_Chor1")] = "CL"
+
+cd$source = factor(as.character(cd$source), levels = c("NP", "Ch"))
+
+cd$methylation_cluster[cd$source == "CL"] = "cell_line"
+
+cd$idh = ifelse(cd$sample %in% c("16_20", "67_11"), "mut", "wt")
+cd$cdkn = ifelse(cd$sample %in% c("5_16", "31_20", "4_19", "24_18", "50_19", "53_18", "9_20", "20_17", "50_15"), "loh", "wt")
+cd
+```
+
+
+
+```{r}
+library(DTUrtle)
+
+dturtle <- run_drimseq(counts = counts, tx2gene = tr.key, pd=cd, id_col = "sample", cond_col = "source", cond_levels = c("Ch", "NP"), filtering_strategy = "bulk")
+
+dturtle <- posthoc_and_stager(dturtle = dturtle, ofdr = 0.05, posthoc = 0.1)
+```
+
+
+```{r}
+dturtle$meta_table_gene$chromosome = trl[match(dturtle$meta_table_gene$gene, trl$ensembl_gene_id),"chromosome_name"]
+
+dturtle$meta_table_gene$hgnc = trl[match(dturtle$meta_table_gene$gene, trl$ensembl_gene_id),"hgnc_symbol"]
+
+dturtle <- create_dtu_table(dturtle = dturtle, add_gene_metadata = list("chromosome"="chromosome", "hgnc"="hgnc"), 
+                               add_tx_metadata = list("tx_expr_in_max" = c("exp_in", max)))
+```
+
+
+```{r}
+x = res[rownames(res) %in% intersect(unique(trl$ensembl_gene_id [match(substr(dturtle$sig_tx,1,15), trl$ensembl_transcript_id)]), dturtle$sig_gene),]
+x = x[x$padj < 0.01,]
+x = x[order(abs(x$stat), decreasing = T),]
+x
+```
+
+```{r}
+x = res[dturtle$dtu_table[order(dturtle$dtu_table$minimal_tx_qvalue),"gene_ID"],]
+x[order(x$padj_1v_3),]
+```
+
+```{r}
+dturtle$drim@results_feature[dturtle$drim@results_feature$gene_id == "ENSG00000139193",]
+```
+
+
+```{r}
+dturtle$meta_table_tx
+```
+
+
+```{r}
+setwd(paste0(wd, "/res"))
+load(file = "dturtle.rdata")
+```
+
+```{r}
+res[order(rowSums(as.matrix(res[,grepl("padj", colnames(res))])<0.01, na.rm = T), decreasing = T),]
+```
+```{r}
+res[order(rowSums(as.matrix(res[,c("padj", "padj_2", "padj_1v_3", "padj_1v_4", "padj_3v_4")]) < 0.01, na.rm = T), decreasing = T),]
+```
+
+
+
+```{r}
+for(what in c("ENSG00000012817", "ENSG00000126012", "ENSG00000198821", "ENSG00000153563", "ENSG00000042781", "ENSG00000125730", "ENSG00000147883", "ENSG00000147889", "ENSG00000010610")){
+  
+  pl = list()
+  
+  df = cd
+  df$gene = norm_c[what,df$sample]
+  df$methylation_cluster = factor(as.character(cd$methylation_cluster), levels = c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"))
+  
+  stat.test <- tibble::tribble(
+    ~group1, ~group2,   ~p.adj,
+      "nucleus_pulposus",     "chordoma_2", res[what,"padj_2"],
+      "chordoma_1",     "chordoma_3", res[what,"padj_1v_3"],
+      "chordoma_1",     "chordoma_4", res[what,"padj_1v_4"],
+      "chordoma_3",     "chordoma_4", res[what,"padj_3v_4"],
+    )
+  
+  stat.test$siglev = ifelse(stat.test$p.adj>0.1, " ", ifelse(stat.test$p.adj>0.05, ".", ifelse(stat.test$p.adj>0.01, "*", ifelse(stat.test$p.adj>0.001, "**", "***"))))
+  stat.test$y = max(df$gene) + (max(df$gene) - min(df$gene))* (0.1 + c(0, cumsum(stat.test$p.adj[2:4]<=0.1)) /10)
+  stat.test = stat.test[!is.na(stat.test$p.adj),]
+  stat.test = stat.test[stat.test$p.adj<=0.1,]
+  
+  library(ggpubr)
+  pl[["gene"]] = ggviolin(data = df, x = "methylation_cluster", y = "gene", add = c("boxplot", "jitter"), add.params = list(color = "black", fill = "white"), fill = "methylation_cluster")
+  if(length(stat.test$group1) > 0){
+      pl[["gene"]] = pl[["gene"]] + stat_pvalue_manual(stat.test, label = "siglev", y.position = stat.test$y) +
+      scale_y_continuous(limits = c(min(df$gene) * 1.1, max(stat.test$y) * 1.1), expand = c(0,0))
+    } else {
+      pl[["gene"]] = pl[["gene"]] + scale_y_continuous(limits = c(min(df$gene) * 1.1, max(df$gene) * 1.1), expand = c(0,0))
+    }
+    pl[["gene"]] = pl[["gene"]] + 
+    labs(title = res[what,"hgnc"], y = "Gene expression Z-score", x = "Group", subtitle = paste0("DESeq2 p-adj. = ", signif(res[what,"padj"], 3), "\nDTUrtle q-val. = ", signif(dturtle$dtu_table[what,"gene_qvalue"], 3))) +
+    scale_fill_manual(values = RColorBrewer::brewer.pal(12, "Paired")[c(2,6,8,4,11)], breaks = c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"), labels = gsub("_", " ", c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"))) + 
+    scale_x_discrete(breaks = c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"), labels = gsub("_", " ", c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"))) + theme(legend.position = "none")
+  
+   
+  if(length(dturtle$meta_table_tx[dturtle$meta_table_tx$gene %in% what,"tx"]) > 0){
+    for(tx in dturtle$meta_table_tx[dturtle$meta_table_tx$gene %in% what,"tx"]){
+    
+      df$tx = (txi.kallisto$counts[tx,])/(pmax(0.1, colSums(txi.kallisto$counts[dturtle$meta_table_tx[dturtle$meta_table_tx$gene %in% what,"tx"],])))
+      
+      stat.test <- tibble::tribble(
+        ~group1, ~group2,   ~p.adj,
+          "nucleus_pulposus",     "chordoma_2", wilcox.test(tx~methylation_cluster, data = df[df$methylation_cluster %in% c("nucleus_pulposus", "chordoma_2"),])$p.value,
+          "chordoma_1",     "chordoma_3", wilcox.test(tx~methylation_cluster, data = df[df$methylation_cluster %in% c("chordoma_1", "chordoma_3"),])$p.value,
+          "chordoma_1",     "chordoma_4", wilcox.test(tx~methylation_cluster, data = df[df$methylation_cluster %in% c("chordoma_1", "chordoma_4"),])$p.value,
+          "chordoma_3",     "chordoma_4", wilcox.test(tx~methylation_cluster, data = df[df$methylation_cluster %in% c("chordoma_3", "chordoma_4"),])$p.value,
+        )
+      
+      stat.test$siglev = ifelse(stat.test$p.adj>0.1, " ", ifelse(stat.test$p.adj>0.05, ".", ifelse(stat.test$p.adj>0.01, "*", ifelse(stat.test$p.adj>0.001, "**", "***"))))
+      stat.test$y = max(df$tx) + (max(df$tx) - min(df$tx))* (0.1 + c(0, cumsum(stat.test$p.adj[2:4]<=0.1)) /10)
+      stat.test = stat.test[!is.na(stat.test$p.adj),]
+      stat.test = stat.test[stat.test$p.adj<=0.1,]
+      
+      pl[[tx]] = ggviolin(data = df, x = "methylation_cluster", y = "tx", add = c("boxplot", "jitter"), add.params = list(color = "black", fill = "white"), fill = "methylation_cluster")
+      if(length(stat.test$group1) > 0){
+        pl[[tx]] = pl[[tx]] + stat_pvalue_manual(stat.test, label = "siglev", y.position = stat.test$y) +
+        scale_y_continuous(limits = c(0, max(stat.test$y) * 1.05), expand = c(0,0))
+      } else {
+        pl[[tx]] = pl[[tx]] + scale_y_continuous(limits = c(0, max(df$tx) * 1.05), expand = c(0,0))
+      }
+      
+      pl[[tx]] = pl[[tx]] + labs(title = tx, y = "Fraction of transcript expression", x = "Group", subtitle = paste0("DTUrtle adj. p-val. = ", signif(dturtle$drim@results_feature[dturtle$drim@results_feature$feature_id == tx,"adj_pvalue"], 3))) +
+        scale_fill_manual(values = RColorBrewer::brewer.pal(12, "Paired")[c(2,6,8,4,11)], breaks = c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"), labels = gsub("_", " ", c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"))) + 
+        scale_x_discrete(breaks = c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"), labels = gsub("_", " ", c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"))) + theme(legend.position = "none")
+    }
+  }
+  setwd(paste0(wd, "/res/degs"))
+  ggsave(ggarrange(plotlist = pl, nrow = length(pl), ncol = 1), width = 7, height = 5*length(pl), dpi = 400, filename = paste0(what, ".png"), limitsize = F)
+}
+```
+
+```{r}
+  df = cd
+  df$gene = norm_c[what,df$sample]
+  df$methylation_cluster = factor(as.character(cd$methylation_cluster), levels = c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"))
+  df$cdkn[df$source == "NP"] = "nucleus_pulposus"
+  df
+```
+
+
+```{r}
+for(what in c("ENSG00000147883", "ENSG00000147889", "ENSG00000010610")){
+  
+  pl = list()
+  
+  df = cd
+  df$gene = norm_c[what,df$sample]
+  df$methylation_cluster = factor(as.character(cd$methylation_cluster), levels = c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"))
+  df$cdkn[df$source == "NP"] = "nucleus_pulposus"
+  
+  'stat.test <- tibble::tribble(
+    ~group1, ~group2,   ~p.adj,
+      "nucleus_pulposus",     "chordoma_2", res[what,"padj_2"],
+      "chordoma_1",     "chordoma_3", res[what,"padj_1v_3"],
+      "chordoma_1",     "chordoma_4", res[what,"padj_1v_4"],
+      "chordoma_3",     "chordoma_4", res[what,"padj_3v_4"],
+    )
+  
+  stat.test$siglev = ifelse(stat.test$p.adj>0.1, " ", ifelse(stat.test$p.adj>0.05, ".", ifelse(stat.test$p.adj>0.01, "*", ifelse(stat.test$p.adj>0.001, "**", "***"))))
+  stat.test$y = max(df$gene) + (max(df$gene) - min(df$gene))* (0.1 + c(0, cumsum(stat.test$p.adj[2:4]<=0.1)) /10)
+  stat.test = stat.test[!is.na(stat.test$p.adj),]
+  stat.test = stat.test[stat.test$p.adj<=0.1,]'
+  
+  library(ggpubr)
+  pl[["gene"]] = ggviolin(data = df, x = "cdkn", y = "gene", add = c("boxplot", "jitter"), add.params = list(color = "black", fill = "white"), fill = "methylation_cluster")
+'  if(length(stat.test$group1) > 0){
+      pl[["gene"]] = pl[["gene"]] + stat_pvalue_manual(stat.test, label = "siglev", y.position = stat.test$y) +
+      scale_y_continuous(limits = c(min(df$gene) * 1.1, max(stat.test$y) * 1.1), expand = c(0,0))
+    } else {
+      pl[["gene"]] = pl[["gene"]] + scale_y_continuous(limits = c(min(df$gene) * 1.1, max(df$gene) * 1.1), expand = c(0,0))
+    }'
+    pl[["gene"]] = pl[["gene"]] + 
+    labs(title = res[what,"hgnc"], y = "Gene expression Z-score", x = "Group", subtitle = paste0("DESeq2 p-adj. = ", signif(res[what,"padj"], 3), "\nDTUrtle q-val. = ", signif(dturtle$dtu_table[what,"gene_qvalue"], 3))) +
+    scale_fill_manual(values = RColorBrewer::brewer.pal(12, "Paired")[c(2,6,8,4,11)], breaks = c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"), labels = gsub("_", " ", c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"))) + 
+    scale_x_discrete(breaks = c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"), labels = gsub("_", " ", c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"))) + theme(legend.position = "none")
+  
+   
+  if(length(dturtle$meta_table_tx[dturtle$meta_table_tx$gene %in% what,"tx"]) > 0){
+    for(tx in dturtle$meta_table_tx[dturtle$meta_table_tx$gene %in% what,"tx"]){
+    
+      df$tx = (txi.kallisto$counts[tx,])/(pmax(0.1, colSums(txi.kallisto$counts[dturtle$meta_table_tx[dturtle$meta_table_tx$gene %in% what,"tx"],])))
+      
+      'stat.test <- tibble::tribble(
+        ~group1, ~group2,   ~p.adj,
+          "nucleus_pulposus",     "chordoma_2", wilcox.test(tx~methylation_cluster, data = df[df$methylation_cluster %in% c("nucleus_pulposus", "chordoma_2"),])$p.value,
+          "chordoma_1",     "chordoma_3", wilcox.test(tx~methylation_cluster, data = df[df$methylation_cluster %in% c("chordoma_1", "chordoma_3"),])$p.value,
+          "chordoma_1",     "chordoma_4", wilcox.test(tx~methylation_cluster, data = df[df$methylation_cluster %in% c("chordoma_1", "chordoma_4"),])$p.value,
+          "chordoma_3",     "chordoma_4", wilcox.test(tx~methylation_cluster, data = df[df$methylation_cluster %in% c("chordoma_3", "chordoma_4"),])$p.value,
+        )
+      
+      stat.test$siglev = ifelse(stat.test$p.adj>0.1, " ", ifelse(stat.test$p.adj>0.05, ".", ifelse(stat.test$p.adj>0.01, "*", ifelse(stat.test$p.adj>0.001, "**", "***"))))
+      stat.test$y = max(df$tx) + (max(df$tx) - min(df$tx))* (0.1 + c(0, cumsum(stat.test$p.adj[2:4]<=0.1)) /10)
+      stat.test = stat.test[!is.na(stat.test$p.adj),]
+      stat.test = stat.test[stat.test$p.adj<=0.1,]'
+      
+      pl[[tx]] = ggviolin(data = df, x = "methylation_cluster", y = "tx", add = c("boxplot", "jitter"), add.params = list(color = "black", fill = "white"), fill = "methylation_cluster")
+      'if(length(stat.test$group1) > 0){
+        pl[[tx]] = pl[[tx]] + stat_pvalue_manual(stat.test, label = "siglev", y.position = stat.test$y) +
+        scale_y_continuous(limits = c(0, max(stat.test$y) * 1.05), expand = c(0,0))
+      } else {
+        pl[[tx]] = pl[[tx]] + scale_y_continuous(limits = c(0, max(df$tx) * 1.05), expand = c(0,0))
+      }'
+      
+      pl[[tx]] = pl[[tx]] + labs(title = tx, y = "Fraction of transcript expression", x = "Group", subtitle = paste0("DTUrtle adj. p-val. = ", signif(dturtle$drim@results_feature[dturtle$drim@results_feature$feature_id == tx,"adj_pvalue"], 3))) +
+        scale_fill_manual(values = RColorBrewer::brewer.pal(12, "Paired")[c(2,6,8,4,11)], breaks = c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"), labels = gsub("_", " ", c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"))) + 
+        scale_x_discrete(breaks = c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"), labels = gsub("_", " ", c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"))) + theme(legend.position = "none")
+    }
+  }
+  setwd(paste0(wd, "/res/degs"))
+  ggsave(ggarrange(plotlist = pl, nrow = length(pl), ncol = 1), width = 7, height = 5*length(pl), dpi = 400, filename = paste0(what, ".png"), limitsize = F)
+}
+```
+
+```{r}
+ggboxplot(data = df, x = "methylation_cluster", y = "gene", add = "jitter", color = "methylation_cluster")
+```
+
+```{r}
+dturtle$drim@results_feature[dturtle$drim@results_feature$gene_id %in% "ENSG00000164458",]
+```
+
+
+
+
+
+```{r}
+stat.test <- tibble::tribble(
+  ~group1, ~group2,   ~p.adj,
+    "nucleus_pulposus",     "chordoma_2", res[what,"padj_2"],
+    "chordoma_1",     "chordoma_3", res[what,"padj_1v_3"],
+    "chordoma_1",     "chordoma_4", res[what,"padj_1v_4"],
+    "chordoma_3",     "chordoma_4", res[what,"padj_3v_4"],
+  )
+stat.test$siglev = ifelse(stat.test$p.adj>0.1, " ", ifelse(stat.test$p.adj>0.05, ".", ifelse(stat.test$p.adj>0.01, "*", ifelse(stat.test$p.adj>0.001, "**", "***"))))
+
+#stat.test = stat.test[!stat.test$siglev == " ",]
+stat.test
+```
+
+
+```{r}
+temp <- plot_proportion_barplot(dturtle = dturtle, genes = c("ENSG00000008083", "ENSG00000095752", "ENSG00000149948", "ENSG00000105371", "ENSG00000164458"), meta_gene_id = "hgnc")
+#> Creating 1 plots:
+temp
+```
+
+```{r}
+temp <- plot_proportion_barplot(dturtle = dturtle, genes = "ENSG00000008853", meta_gene_id = "hgnc")
+#> Creating 1 plots:
+temp
+```
+```{r}
+sapply(intersect(sapply(strsplit(dturtle$sig_gene, "\\."), function(x){x[1]}), rownames(res[res$padj < 0.01,])), function(el){dturtle$sig_gene[grepl(el, dturtle$sig_gene)][1]})
+```
+
+```{r}
+setwd(paste0(wd, "/res"))
+save(dturtle, file = "dturtle.rdata")
+```
+
+```{r}
+plot_proportion_barplot
+```
+
+
+```{r}
+setwd(paste0(wd, "/res"))
+
+column_formatter_list <- list(
+      "gene_qvalue" = table_pval_tile("white", "orange", digits = 3),
+      "minimal_tx_qvalue" = table_pval_tile("white", "orange", digits = 3),
+      "number_tx" = formattable::color_tile('white', "lightblue"),
+      "number_significant_tx" = formattable::color_tile('white', "lightblue"),
+      "max(Dex2hr-EtOH)" = table_percentage_bar('lightgreen', "#FF9999", digits=2),
+      "tx_expr_in_max" = table_percentage_bar('white', "lightblue", color_break = 0, digits=2))
+
+plot_dtu_table(dturtle = dturtle, savepath = "my_results.html", 
+               column_formatters = column_formatter_list)
+```
+
+
+
+
+```{r}
+#CELL POPULATIONS
+```
+
+```{r}
+s = c("11_18", "16_20", "18_16", "19_19", "20_17", "24_18", "26_15", "26_16", "28_20", "31_14", "31_20", "32_14", "35_17", "37_19", "38_17", "39_18", "40_18", "45_17",  "50_15", "50_19", "53_18", "54_15", "55_19",  "62_15", "67_11", "68_18",  "74_19", "81_15", "92_15", "5_16","4_19","6_16","7_19", "9_20", "NP4", "NP7", "NP8", "NP9")
+
+s
+```
+
+
+
+
+
+```{r}
+wd = getwd()
+setwd(paste0(wd, "/dt"))
+load(file = "transcripts_key.Rdata")
+```
+
+```{r}
+tr.key[tr.key$gene_biotype %in% c("protein_coding", unique(tr.key$gene_biotype)[grepl("_gene", unique(tr.key$gene_biotype))]),]
+```
+
+
+
+
+```{r}
+files = sapply(s, function(el){
+  paste0("D:/Files/Molecular_data/chordoma_RNAseq/output/", el, "/abundance.h5")
+})
+txi.kallisto <- tximport(files, type = "kallisto", txOut = F, txIn = T, tx2gene = tr.key[tr.key$gene_biotype %in% c("protein_coding", unique(tr.key$gene_biotype)[grepl("_gene", unique(tr.key$gene_biotype))]),c("rn", "ensembl_gene_id")])
+```
+
+```{r}
+tpm = txi.kallisto$abundance
+tpm = tpm[!((trl[match(rownames(tpm), trl$ensembl_gene_id),"hgnc_symbol"]) == ""),]
+rownames(tpm) = trl[match(rownames(tpm), trl$ensembl_gene_id),"hgnc_symbol"]
+```
+
+```{r}
+library(immunedeconv)
+```
+```{r}
+
+cd = data.frame(source = ifelse(grepl("NP", colnames(txi.kallisto$abundance)), "NP", "Ch"),
+                sample = colnames(txi.kallisto$abundance))
+
+x = read.csv("spl_clust.csv")
+
+
+
+cd$methylation_cluster = x[match(cd$sample, gsub("/", "_", x$Sample_Name)),"type"]
+
+cd$methylation_cluster[cd$source == "NP"] = "nucleus_pulposus"
+
+cd$source[cd$sample %in% c("MUG_CC1", "UM_Chor1")] = "CL"
+
+cd$source = factor(as.character(cd$source), levels = c("NP", "Ch"))
+
+cd$methylation_cluster[cd$source == "CL"] = "cell_line"
+
+cd$idh = ifelse(cd$sample %in% c("16_20", "67_11"), "mut", "wt")
+cd$cdkn = ifelse(cd$sample %in% c("5_16", "31_20", "4_19", "24_18", "50_19", "53_18", "9_20", "20_17", "50_15"), "loh", "wt")
+cd
+```
+
+```{r}
+res_quantiseq = deconvolute(tpm, "quantiseq", tumor = TRUE)
+```
+
+
+```{r}
+setwd(paste0(wd, "/deconv"))
+library(ggplot2)
+library(tidyr)
+df = res_quantiseq[,colnames(res_quantiseq) %in% c("cell_type", cd$sample)] %>% gather(sample, fraction, -cell_type)
+df$sample = factor(as.character(df$sample), levels = df[df$cell_type == "uncharacterized cell",]$sample[order(df[df$cell_type == "uncharacterized cell",]$fraction)])
+df$methylation_cluster = cd[match(df$sample, cd$sample),"methylation_cluster"]
+
+x = tapply(df[df$cell_type == "uncharacterized cell",]$fraction, df[df$cell_type == "uncharacterized cell",]$methylation_cluster, mean)
+df$methylation_cluster = factor(as.character(df$methylation_cluster), levels = rev(names(x[order(x)])))
+
+p = ggplot(data = df, aes(x=sample, y=fraction, fill=cell_type)) +
+  geom_bar(stat='identity') +
+  facet_grid(methylation_cluster ~ .,  scales = "free", space = "free") +
+  coord_flip() +
+  scale_fill_brewer(palette="Paired", name = "Cell type") +
+  scale_x_discrete(limits = rev(levels(res_quantiseq))) +
+  theme_minimal() + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position = "bottom", strip.text.y = element_text(angle = 0)) + 
+  labs(title = "Cell type deconvolution", subtitle = "quanTIseq")
+
+ggsave(plot = p, filename = "quantiseq.png", width = 8, height = 8, dpi = 400)
+```
+
+
+```{r}
+setwd(paste0(wd, "/deconv"))
+df_quantiseq = as.data.frame(res_quantiseq)
+rownames(df_quantiseq) = df_quantiseq$cell_type
+df_quantiseq = df_quantiseq[,!colnames(df_quantiseq) == "cell_type"]
+df_quantiseq = as.data.frame(flip(df_quantiseq))
+df_quantiseq$source = cd$source[match(rownames(df_quantiseq), cd$sample)]
+df_quantiseq$methylation_cluster = cd$methylation_cluster[match(rownames(df_quantiseq), cd$sample)]
+df_quantiseq
+
+res_quantiseq$p_NP_ch = sapply(res_quantiseq$cell_type, function(el){
+  wilcox.test(as.formula(paste0("`", el, "` ~ source")), data = df_quantiseq)$p.val
+})
+res_quantiseq$padj_NP_ch = p.adjust(res_quantiseq$p_NP_ch, method = "BH")
+
+res_quantiseq$p_NP_2 = sapply(res_quantiseq$cell_type, function(el){
+  wilcox.test(as.formula(paste0("`", el, "` ~ source")), data = df_quantiseq[df_quantiseq$methylation_cluster %in% c("chordoma_2", "nucleus_pulposus"),])$p.val
+})
+res_quantiseq$padj_NP_2 = p.adjust(res_quantiseq$p_NP_2, method = "BH")
+
+res_quantiseq$p_1_3 = sapply(res_quantiseq$cell_type, function(el){
+  wilcox.test(as.formula(paste0("`", el, "` ~ methylation_cluster")), data = df_quantiseq[df_quantiseq$methylation_cluster %in% c("chordoma_1", "chordoma_3"),])$p.val
+})
+res_quantiseq$padj_1_3 = p.adjust(res_quantiseq$p_1_3, method = "BH")
+
+res_quantiseq$p_1_4 = sapply(res_quantiseq$cell_type, function(el){
+  wilcox.test(as.formula(paste0("`", el, "` ~ methylation_cluster")), data = df_quantiseq[df_quantiseq$methylation_cluster %in% c("chordoma_1", "chordoma_4"),])$p.val
+})
+res_quantiseq$padj_1_4 = p.adjust(res_quantiseq$p_1_4, method = "BH")
+
+res_quantiseq$p_3_4 = sapply(res_quantiseq$cell_type, function(el){
+  wilcox.test(as.formula(paste0("`", el, "` ~ methylation_cluster")), data = df_quantiseq[df_quantiseq$methylation_cluster %in% c("chordoma_1", "chordoma_4"),])$p.val
+})
+res_quantiseq$padj_3_4 = p.adjust(res_quantiseq$p_3_4, method = "BH")
+
+write.csv(res_quantiseq[order(res_quantiseq$p_NP_ch),!colnames(res_quantiseq) %in% cd$sample], file = "quantiseq.csv")
+
+
+```
+
+
+
+```{r}
+res_epic = deconvolute(tpm, "epic", tumor = TRUE)
+
+setwd(paste0(wd, "/deconv"))
+library(ggplot2)
+library(tidyr)
+df = res_epic[,colnames(res_epic) %in% c("cell_type", cd$sample)] %>% gather(sample, fraction, -cell_type)
+df$sample = factor(as.character(df$sample), levels = df[df$cell_type == "uncharacterized cell",]$sample[order(df[df$cell_type == "uncharacterized cell",]$fraction)])
+df$methylation_cluster = cd[match(df$sample, cd$sample),"methylation_cluster"]
+
+x = tapply(df[df$cell_type == "uncharacterized cell",]$fraction, df[df$cell_type == "uncharacterized cell",]$methylation_cluster, mean)
+df$methylation_cluster = factor(as.character(df$methylation_cluster), levels = rev(names(x[order(x)])))
+
+p = ggplot(data = df, aes(x=sample, y=fraction, fill=cell_type)) +
+  geom_bar(stat='identity') +
+  facet_grid(methylation_cluster ~ .,  scales = "free", space = "free") +
+  coord_flip() +
+  scale_fill_brewer(palette="Paired", name = "Cell type") +
+  scale_x_discrete(limits = rev(levels(res_epic))) +
+  theme_minimal() + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position = "bottom", strip.text.y = element_text(angle = 0)) + 
+  labs(title = "Cell type deconvolution", subtitle = "EPIC")
+
+ggsave(plot = p, filename = "epic.png", width = 8, height = 8, dpi = 400)
+
+setwd(paste0(wd, "/deconv"))
+df_epic = as.data.frame(res_epic)
+rownames(df_epic) = df_epic$cell_type
+df_epic = df_epic[,!colnames(df_epic) == "cell_type"]
+df_epic = as.data.frame(flip(df_epic))
+df_epic$source = cd$source[match(rownames(df_epic), cd$sample)]
+df_epic$methylation_cluster = cd$methylation_cluster[match(rownames(df_epic), cd$sample)]
+df_epic
+
+res_epic$p_NP_ch = sapply(res_epic$cell_type, function(el){
+  wilcox.test(as.formula(paste0("`", el, "` ~ source")), data = df_epic)$p.val
+})
+res_epic$padj_NP_ch = p.adjust(res_epic$p_NP_ch, method = "BH")
+
+res_epic$p_NP_2 = sapply(res_epic$cell_type, function(el){
+  wilcox.test(as.formula(paste0("`", el, "` ~ source")), data = df_epic[df_epic$methylation_cluster %in% c("chordoma_2", "nucleus_pulposus"),])$p.val
+})
+res_epic$padj_NP_2 = p.adjust(res_epic$p_NP_2, method = "BH")
+
+res_epic$p_1_3 = sapply(res_epic$cell_type, function(el){
+  wilcox.test(as.formula(paste0("`", el, "` ~ methylation_cluster")), data = df_epic[df_epic$methylation_cluster %in% c("chordoma_1", "chordoma_3"),])$p.val
+})
+res_epic$padj_1_3 = p.adjust(res_epic$p_1_3, method = "BH")
+
+res_epic$p_1_4 = sapply(res_epic$cell_type, function(el){
+  wilcox.test(as.formula(paste0("`", el, "` ~ methylation_cluster")), data = df_epic[df_epic$methylation_cluster %in% c("chordoma_1", "chordoma_4"),])$p.val
+})
+res_epic$padj_1_4 = p.adjust(res_epic$p_1_4, method = "BH")
+
+res_epic$p_3_4 = sapply(res_epic$cell_type, function(el){
+  wilcox.test(as.formula(paste0("`", el, "` ~ methylation_cluster")), data = df_epic[df_epic$methylation_cluster %in% c("chordoma_1", "chordoma_4"),])$p.val
+})
+res_epic$padj_3_4 = p.adjust(res_epic$p_3_4, method = "BH")
+
+write.csv(res_epic[order(res_epic$p_NP_ch),!colnames(res_epic) %in% cd$sample], file = "epic.csv")
+```
+
+```{r}
+res_xcell = deconvolute(tpm, "xcell", tumor = TRUE)
+
+setwd(paste0(wd, "/deconv"))
+df_xcell = as.data.frame(res_xcell)
+rownames(df_xcell) = df_xcell$cell_type
+df_xcell = df_xcell[,!colnames(df_xcell) == "cell_type"]
+df_xcell = as.data.frame(flip(df_xcell))
+df_xcell$source = cd$source[match(rownames(df_xcell), cd$sample)]
+df_xcell$methylation_cluster = cd$methylation_cluster[match(rownames(df_xcell), cd$sample)]
+df_xcell
+
+res_xcell$p_NP_ch = sapply(res_xcell$cell_type, function(el){
+  wilcox.test(as.formula(paste0("`", el, "` ~ source")), data = df_xcell)$p.val
+})
+res_xcell$padj_NP_ch = p.adjust(res_xcell$p_NP_ch, method = "BH")
+
+res_xcell$p_NP_2 = sapply(res_xcell$cell_type, function(el){
+  wilcox.test(as.formula(paste0("`", el, "` ~ source")), data = df_xcell[df_xcell$methylation_cluster %in% c("chordoma_2", "nucleus_pulposus"),])$p.val
+})
+res_xcell$padj_NP_2 = p.adjust(res_xcell$p_NP_2, method = "BH")
+
+res_xcell$p_1_3 = sapply(res_xcell$cell_type, function(el){
+  wilcox.test(as.formula(paste0("`", el, "` ~ methylation_cluster")), data = df_xcell[df_xcell$methylation_cluster %in% c("chordoma_1", "chordoma_3"),])$p.val
+})
+res_xcell$padj_1_3 = p.adjust(res_xcell$p_1_3, method = "BH")
+
+res_xcell$p_1_4 = sapply(res_xcell$cell_type, function(el){
+  wilcox.test(as.formula(paste0("`", el, "` ~ methylation_cluster")), data = df_xcell[df_xcell$methylation_cluster %in% c("chordoma_1", "chordoma_4"),])$p.val
+})
+res_xcell$padj_1_4 = p.adjust(res_xcell$p_1_4, method = "BH")
+
+res_xcell$p_3_4 = sapply(res_xcell$cell_type, function(el){
+  wilcox.test(as.formula(paste0("`", el, "` ~ methylation_cluster")), data = df_xcell[df_xcell$methylation_cluster %in% c("chordoma_1", "chordoma_4"),])$p.val
+})
+res_xcell$padj_3_4 = p.adjust(res_xcell$p_3_4, method = "BH")
+
+write.csv(res_xcell[order(res_xcell$p_NP_ch),!colnames(res_xcell) %in% cd$sample], file = "xcell.csv")
+```
+```{r}
+scores_xcell = res_xcell[grepl("score",res_xcell$cell_type),]
+res_xcell = res_xcell[!grepl("score",res_xcell$cell_type),]
+```
+
+```{r}
+for(el in cd$sample){
+  res_xcell[,el] = res_xcell[,el] / sum(res_xcell[,el])
+}
+```
+
+```{r}
+df = res_xcell[,colnames(res_xcell) %in% c("cell_type", cd$sample)] %>% gather(sample, fraction, -cell_type)
+df
+```
+
+
+```{r}
+res_mcp_counter = deconvolute(tpm, "mcp_counter", tumor = TRUE)
+
+setwd(paste0(wd, "/deconv"))
+library(ggplot2)
+library(tidyr)
+df = res_mcp_counter[,colnames(res_mcp_counter) %in% c("cell_type", cd$sample)] %>% gather(sample, fraction, -cell_type)
+df$sample = factor(as.character(df$sample), levels = df[df$cell_type == "Cancer associated fibroblast",]$sample[order(df[df$cell_type == "Cancer associated fibroblast",]$fraction)])
+df$methylation_cluster = cd[match(df$sample, cd$sample),"methylation_cluster"]
+
+x = tapply(df[df$cell_type == "Cancer associated fibroblast",]$fraction, df[df$cell_type == "Cancer associated fibroblast",]$methylation_cluster, mean)
+df$methylation_cluster = factor(as.character(df$methylation_cluster), levels = rev(names(x[order(x)])))
+
+p = ggplot(data = df, aes(x=sample, y=fraction, fill=cell_type)) +
+  geom_bar(stat='identity') +
+  facet_grid(methylation_cluster ~ .,  scales = "free", space = "free") +
+  coord_flip() +
+  scale_fill_brewer(palette="Paired", name = "Cell type") +
+  scale_x_discrete(limits = rev(levels(res_mcp_counter))) +
+  theme_minimal() + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position = "bottom", strip.text.y = element_text(angle = 0)) + 
+  labs(title = "Cell type deconvolution", subtitle = "MCP counter")
+
+ggsave(plot = p, filename = "mcp_counter.png", width = 8, height = 8, dpi = 400)
+
+setwd(paste0(wd, "/deconv"))
+df_mcp_counter = as.data.frame(res_mcp_counter)
+rownames(df_mcp_counter) = df_mcp_counter$cell_type
+df_mcp_counter = df_mcp_counter[,!colnames(df_mcp_counter) == "cell_type"]
+df_mcp_counter = as.data.frame(flip(df_mcp_counter))
+df_mcp_counter$source = cd$source[match(rownames(df_mcp_counter), cd$sample)]
+df_mcp_counter$methylation_cluster = cd$methylation_cluster[match(rownames(df_mcp_counter), cd$sample)]
+
+res_mcp_counter$p_NP_ch = sapply(res_mcp_counter$cell_type, function(el){
+  wilcox.test(as.formula(paste0("`", el, "` ~ source")), data = df_mcp_counter)$p.val
+})
+res_mcp_counter$padj_NP_ch = p.adjust(res_mcp_counter$p_NP_ch, method = "BH")
+
+res_mcp_counter$p_NP_2 = sapply(res_mcp_counter$cell_type, function(el){
+  wilcox.test(as.formula(paste0("`", el, "` ~ source")), data = df_mcp_counter[df_mcp_counter$methylation_cluster %in% c("chordoma_2", "nucleus_pulposus"),])$p.val
+})
+res_mcp_counter$padj_NP_2 = p.adjust(res_mcp_counter$p_NP_2, method = "BH")
+
+res_mcp_counter$p_1_3 = sapply(res_mcp_counter$cell_type, function(el){
+  wilcox.test(as.formula(paste0("`", el, "` ~ methylation_cluster")), data = df_mcp_counter[df_mcp_counter$methylation_cluster %in% c("chordoma_1", "chordoma_3"),])$p.val
+})
+res_mcp_counter$padj_1_3 = p.adjust(res_mcp_counter$p_1_3, method = "BH")
+
+res_mcp_counter$p_1_4 = sapply(res_mcp_counter$cell_type, function(el){
+  wilcox.test(as.formula(paste0("`", el, "` ~ methylation_cluster")), data = df_mcp_counter[df_mcp_counter$methylation_cluster %in% c("chordoma_1", "chordoma_4"),])$p.val
+})
+res_mcp_counter$padj_1_4 = p.adjust(res_mcp_counter$p_1_4, method = "BH")
+
+res_mcp_counter$p_3_4 = sapply(res_mcp_counter$cell_type, function(el){
+  wilcox.test(as.formula(paste0("`", el, "` ~ methylation_cluster")), data = df_mcp_counter[df_mcp_counter$methylation_cluster %in% c("chordoma_1", "chordoma_4"),])$p.val
+})
+res_mcp_counter$padj_3_4 = p.adjust(res_mcp_counter$p_3_4, method = "BH")
+
+write.csv(res_mcp_counter[order(res_mcp_counter$p_NP_ch),!colnames(res_mcp_counter) %in% cd$sample], file = "mcp_counter.csv")
+```
+
+
+
+
+```{r}
+
+
+setwd(paste0(wd, "/deconv"))
+library(ggplot2)
+library(tidyr)
+df = res_xcell[,colnames(res_xcell) %in% c("cell_type", cd$sample)] %>% gather(sample, fraction, -cell_type)
+df$sample = factor(as.character(df$sample), levels = df[df$cell_type == "B cell",]$sample[order(df[df$cell_type == "B cell",]$fraction)])
+df$methylation_cluster = cd[match(df$sample, cd$sample),"methylation_cluster"]
+
+x = tapply(df[df$cell_type == "B cell",]$fraction, df[df$cell_type == "B cell",]$methylation_cluster, mean)
+df$methylation_cluster = factor(as.character(df$methylation_cluster), levels = rev(names(x[order(x)])))
+
+p = ggplot(data = df, aes(x=sample, y=fraction, fill=cell_type)) +
+  geom_bar(stat='identity') +
+  facet_grid(methylation_cluster ~ .,  scales = "free", space = "free") +
+  coord_flip() +
+  #scale_fill_brewer(palette="Paired", name = "Cell type") +
+  scale_x_discrete(limits = rev(levels(res_xcell))) +
+  theme_minimal() + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position = "bottom", strip.text.y = element_text(angle = 0)) + 
+  labs(title = "Cell type deconvolution", subtitle = "xCell")
+
+ggsave(plot = p, filename = "xcell.png", width = 12, height = 8, dpi = 400)
+
+
+```
+
+
+
+```{r}
+#FUSIONS
+```
+
+```{r}
+# Matthew Bashton 2017-2019
+# Load JSON output from pizzly add in gene co-ordinates + compute distance when on same chr
+
+# CRAN
+#install.packages("jsonlite")
+#install.packages("dplyr")
+
+# Bioconductor
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install()
+#BiocManager::install("ensembldb")
+#BiocManager::install("EnsDb.Hsapiens.v86")
+
+# Set up
+# Change to your own output location
+#setwd("~/RNA_Seq")
+
+# CRAN libs
+library(jsonlite)
+library(dplyr)
+
+# Assuming you have used GRCh38 gene models
+#library(EnsDb.Hsapiens.v86)
+#edb <- EnsDb.Hsapiens.v86
+#listColumns(edb)
+#supportedFilters(edb)
+
+
+# Suffix which apears after sample id in output file name
+suffix <- "_fusion_GRCh38.json"
+
+# Lets get a list of all the files we want to process
+JSON_files <- list.files(path = getwd(), pattern = paste0("*",suffix))
+
+# Make a list of Ids
+Ids <- gsub(suffix, "", JSON_files)
+
+# This function will flatten out the JSON giving you a list of gene A and gene
+# B sorted by splitcount then paircount
+GetFusionz <- function(sample, suffix) {
+
+  # To test
+  #sample <- Ids[1]
+  #suffix = "_fusion_GRCh38.json"
+
+  JSON_file <- paste0(sample, suffix)
+  cat(paste("### Working on sample:", sample, "input file:", JSON_file, "###", "\n"))
+  cat("Reading JSON..\n")
+  JSON <- fromJSON(JSON_file, flatten = TRUE)
+  cat("Extracting gene dataframe\n")
+  JSON_level1 <- JSON$genes
+  cat("Sorting by number of events\n")
+  idx <- order(JSON_level1$splitcount, JSON_level1$paircount, decreasing = TRUE)
+  output <- JSON_level1[idx,]
+  # Clean up IDs
+  output$geneA.id <- gsub(".\\d+$", "", output$geneA.id, perl = TRUE)
+  output$geneB.id <- gsub(".\\d+$", "", output$geneB.id, perl = TRUE)
+  cat(paste0("Writing out table: ", sample, "_fusions_filt_sorted.txt", "\n"))
+  write.table(output[,c(-3,-4)], file = paste0(sample, "_fusions_filt_sorted.txt"), quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+  cat("\n")
+  return(TRUE)
+}
+
+# Use above funciton on all output files
+#lapply(Ids, function(x) GetFusionz(x, suffix = "_fusion_GRCh38.json") )
+
+# This function will flatten out the JSON giving you a list of gene A and gene B
+# sorted by splitcount then paircount, it will also get co-ordinates for each
+# gene, and if on same chr caculate distance between the two
+GetFusionz_and_namez <- function(sample, suffix) {
+
+  # To test
+  #sample <- Ids[7]
+  #suffix = "_fusion_GRCh38.json"
+
+  JSON_file <- paste0(sample, suffix)
+  cat(paste("### Working on sample:", sample, "input file:", JSON_file, "###", "\n"))
+  cat("Reading JSON..\n")
+  JSON <- fromJSON(JSON_file, flatten = TRUE)
+  cat("Extracting gene dataframe\n")
+  JSON_level1 <- JSON$genes
+  output <- JSON_level1
+
+  # Drop weird cols
+  output <- output[,c(-3,-4)]
+
+  # Clean up IDs
+  output$geneA.id <- gsub(".\\d+$", "", output$geneA.id, perl = TRUE)
+  output$geneB.id <- gsub(".\\d+$", "", output$geneB.id, perl = TRUE)
+
+  # Add uniq-key
+  output <- cbind(rownames(output), output)
+  tmp <- colnames(output)[-1]
+  colnames(output) <- c("ID", tmp)
+  #colnames(output)
+  #head(output)
+
+  # Now extract geneA geneB locations
+  # get all geneAs
+  cat("Getting co-ordinates for gene A\n")
+  geneAs <- output$geneA.id
+  geneAs_info <- genes(edb,
+        columns = c("gene_id","seq_name","gene_seq_start","gene_seq_end","seq_strand"),
+        filter = GeneIdFilter(geneAs),
+        return.type = "DataFrame")
+
+  # get all geneBs
+  cat("Getting co-ordinates for gene B\n")
+  geneBs <- output$geneB.id
+  geneBs_info <- genes(edb,
+                       columns = c("gene_id","seq_name","gene_seq_start","gene_seq_end","seq_strand"),
+                       filter = GeneIdFilter(geneBs),
+                       return.type = "DataFrame")
+
+  # Rename cols
+  colnames(geneAs_info) <- paste0("geneA.", colnames(geneAs_info))
+  colnames(geneBs_info) <- paste0("geneB.", colnames(geneBs_info))
+  #colnames(geneAs_info)
+  #colnames(geneBs_info)
+
+  # Merge in geneA_info
+  cat("Merging DFs\n")
+  tmp1 <- merge(output, geneAs_info, by.x = "geneA.id", by.y = "geneA.gene_id", all.x = TRUE)
+  tmp2 <- merge(output, geneBs_info, by.x = "geneB.id", by.y = "geneB.gene_id", all.x = TRUE)
+
+  # Check we have the same length
+  stopifnot(nrow(tmp1) == nrow(tmp2))
+
+  # Merge these DFs
+  output <- merge(tmp1, tmp2[,c(2,8:11)], by = "ID")[,c(1,3,4,2,5,8,9,10,11,6,7,12,13,14,15)]
+  colnames(output)
+
+  # Now use mutate
+  cat("Finding genes on same chr\n")
+  super_identical <- Vectorize(identical, c("x", "y"))
+  # Need to convert from DataFrame to data.frame
+  output <- as.data.frame(output)
+  output <- mutate(output, same_chr = super_identical(output$geneA.seq_name,output$geneB.seq_name))
+  identical_idx <- which(output$same_chr == TRUE)
+
+
+  # New function for getting distance
+  GetDistance <- function(RowIdx, dat) {
+    OurRow <- dat[RowIdx,]
+    # If we have NA annotation return NA
+    if(any(is.na(c(dat[RowIdx,]$geneA.seq_name, dat[RowIdx,]$geneB.seq_name)))) {
+      return(NA)
+    }
+    # Test which starts 1st geneA or geneB
+      geneA_1st <- ifelse(OurRow$geneA.gene_seq_end < OurRow$geneB.gene_seq_start, TRUE,FALSE)
+    if(geneA_1st == TRUE) {
+      return(OurRow$geneB.gene_seq_start - OurRow$geneA.gene_seq_end)
+    } else if(geneA_1st == FALSE) {
+      return(OurRow$geneA.gene_seq_start - OurRow$geneB.gene_seq_end)
+    }
+  }
+
+  # Test
+  #GetDistance(22, output)
+  #GetDistance(476, output)
+  #GetDistance(5916, output)
+
+  # Only run if our index has at least one TRUE value
+  if(sum(identical_idx)) {
+
+    # Get distances
+    cat("Computing gene distances\n")
+    geneDistance <- sapply(identical_idx, function(x) GetDistance(x, output))
+    output[identical_idx,"gene_distance"] <- geneDistance
+
+  }
+
+  # Sort by splitcount then paircount
+  cat("Sorting by number of events\n")
+  idx <- order(output$splitcount, output$paircount, decreasing = TRUE)
+  output <- output[idx,]
+
+  # Write out output
+  cat(paste0("Writing out table: ", sample, "_fusions_filt_sorted.txt", "\n"))
+  write.table(output, file = paste0(sample, "_fusions_filt_sorted.txt"), quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+  cat("\n")
+  return(TRUE)
+}
+```
+
+```{r}
+paste0()
+```
+
+
+```{r}
+wd = getwd()
+# Use above funciton on all output files
+setwd(paste0(wd, "/grolar"))
+lapply(paste0("D:/Files/Molecular_data/chordoma_RNAseq/output/", s, "/pizzly.json"), function(x) GetFusionz_and_namez(x, suffix = "") )
+```
+
+
+```{r}
+x = lapply(paste0("D:/Files/Molecular_data/chordoma_RNAseq/output/", s, "/pizzly.json_fusions_filt_sorted.txt"), read.table, header = T)
+names(x) = s
+x
+```
+```{r}
+df = NULL
+for(el in names(x)){
+  x[[el]][,"sam"] = el
+  df = rbind(df, x[[el]][x[[el]][,"paircount"]>=10,])
+}
+
+df
+```
+```{r}
+setwd(paste0(wd, "/res"))
+write.csv(df, file = "fusions.csv")
+```
+
+```{r}
+#TRANSPOSABLE
+```
+
+```{r}
+library(biomartr)
+```
+
+
+```{r}
+setwd("D:/Files/Molecular_data/chordoma_RNAseq/transp")
+TE = read_rm("hg19.fa.out.gz")
+TE
+```
+
+```{r}
+setwd("D:/Files/Molecular_data/chordoma_RNAseq/transp")
+#save(TE, file = "TE.Rdata")
+load(file = "TE.Rdata")
+```
+
+
+
+```{r}
+x = as.data.frame(TE[grepl("LINE", TE$matching_class),]) #unique(TE$matching_class)[grepl("LTR", unique(TE$matching_class))]),]
+
+x$t = paste0("t_", 1:length(x$sw_score))
+rownames(x) = x$t
+
+
+x$strand = ifelse(x$matching_repeat == "+", "+", "-")
+
+
+gr = x[,c("qry_id", "qry_start","qry_end","strand", "t")]
+
+gr
+
+rm(list = setdiff(ls(), "gr"))
+```
+
+
+
+
+
+
+
+```{r}
+library(BSgenome.Hsapiens.UCSC.hg19)
+```
+
+
+```{r}
+hg19 = BSgenome.Hsapiens.UCSC.hg19
+```
+
+
+
+```{r}
+setwd("D:/Files/Molecular_data/chordoma_RNAseq/transp")
+
+seq = getSeq(hg19, names = gr$qry_id, start = gr$qry_start, end = gr$qry_end, strand = gr$strand)
+names(seq) = gr$t
+
+writeXStringSet(seq, filepath = "TEs_LINE.fasta.gz", append=FALSE,compress=T, format="fasta")
+
+seq
+```
+```{r}
+setwd("D:/Files/Molecular_data/chordoma_RNAseq/transp")
+fasta.index("TEs_LINE.fasta.gz")
+```
+
+```{r}
+#kallisto index transp/TEs_LINE.fasta.gz -i transp/TEs_LINE.idx
+```
+
+```{r}
+s = c("11_18", "16_20", "18_16", "19_19", "20_17", "24_18", "26_15", "26_16", "28_20", "31_14", "31_20", "32_14", "35_17", "37_19", "38_17", "39_18", "40_18", "45_17",  "50_15", "50_19", "53_18", "54_15", "55_19",  "62_15", "67_11", "68_18",  "74_19", "81_15", "92_15", "5_16","4_19","6_16","7_19", "9_20", "NP4", "NP7", "NP8", "NP9")
+
+s
+```
+
+```{r}
+paste0(sapply(s, function(el){
+  paste0("kallisto quant -i transp/TEs_LINE.idx -o transp/LINE/", el, " -b 40 -t 5 --bias dt/", el, "_1.fastq.gz  dt/", el, "_2.fastq.gz")
+}), collapse = "; ")
+```
+
+
+
+```{r}
+setwd("D:/Files/Molecular_data/chordoma_RNAseq/transp")
+#save(TE, file = "TE.Rdata")
+load(file = "TE.Rdata")
+```
+
+
+
+```{r}
+x = as.data.frame(TE[grepl("LTR", TE$matching_class),]) #unique(TE$matching_class)[grepl("LTR", unique(TE$matching_class))]),]
+
+x$t = paste0("t_", 1:length(x$sw_score))
+rownames(x) = x$t
+
+
+x$strand = ifelse(x$matching_repeat == "+", "+", "-")
+
+
+gr = x[,c("qry_id", "qry_start","qry_end","strand", "t")]
+
+gr
+
+rm(list = setdiff(ls(), "gr"))
+```
+
+
+
+
+
+
+
+```{r}
+library(BSgenome.Hsapiens.UCSC.hg19)
+```
+
+
+```{r}
+hg19 = BSgenome.Hsapiens.UCSC.hg19
+```
+
+
+
+```{r}
+setwd("D:/Files/Molecular_data/chordoma_RNAseq/transp")
+
+seq = getSeq(hg19, names = gr$qry_id, start = gr$qry_start, end = gr$qry_end, strand = gr$strand)
+names(seq) = gr$t
+
+writeXStringSet(seq, filepath = "TEs_LTR.fasta.gz", append=FALSE,compress=T, format="fasta")
+
+seq
+```
+```{r}
+setwd("D:/Files/Molecular_data/chordoma_RNAseq/transp")
+fasta.index("TEs_LTR.fasta.gz")
+```
+
+```{r}
+s = c("11_18", "16_20", "18_16", "19_19", "20_17", "24_18", "26_15", "26_16", "28_20", "31_14", "31_20", "32_14", "35_17", "37_19", "38_17", "39_18", "40_18", "45_17",  "50_15", "50_19", "53_18", "54_15", "55_19",  "62_15", "67_11", "68_18",  "74_19", "81_15", "92_15", "5_16","4_19","6_16","7_19", "9_20", "NP4", "NP7", "NP8", "NP9")
+
+s
+```
+
+```{r}
+#kallisto index transp/TEs_LTR.fasta.gz -i transp/TEs_LTR.idx; 
+paste0(sapply(s, function(el){
+  paste0("kallisto quant -i transp/TEs_LTR.idx -o transp/LTR/", el, " -b 40 -t 5 --bias dt/", el, "_1.fastq.gz  dt/", el, "_2.fastq.gz")
+}), collapse = "; ")
+```
+
+
+
+
+
+
+```{r}
+setwd("D:/Files/Molecular_data/chordoma_RNAseq/transp")
+#save(TE, file = "TE.Rdata")
+load(file = "TE.Rdata")
+x = as.data.frame(TE[grepl("LINE", TE$matching_class),]) #unique(TE$matching_class)[grepl("LTR", unique(TE$matching_class))]),]
+
+x$t = paste0("t_", 1:length(x$sw_score))
+rownames(x) = x$t
+
+
+x$strand = ifelse(x$matching_repeat == "+", "+", "-")
+
+x
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+files = sapply(s, function(el){
+  paste0("D:/Files/Molecular_data/chordoma_RNAseq/transp/LINE/", el, "/abundance.h5")
+})
+
+memory.limit(5*16257)
+gc()
+
+
+txi.LINE <- tximport(files, type = "kallisto", txOut = F, txIn = T, tx2gene = x[,c("t", "repeat_id")])
+
+wd = getwd()
+setwd(paste0(wd, "/dt"))
+
+save(txi.LINE, file = "txi.LINE.Rdata")
+
+x = txi.LINE$counts
+
+save(x, file = "LINE_counts.Rdata")
+
+```
+
+
+
+
+
+
+
+
+
+```{r}
+#setwd("D:/Files/Molecular_data/chordoma_RNAseq/transp")
+#save(TE, file = "TE.Rdata")
+#load(file = "TE.Rdata")
+x = as.data.frame(TE[grepl("LTR", TE$matching_class),]) #unique(TE$matching_class)[grepl("LTR", unique(TE$matching_class))]),]
+
+x$t = paste0("t_", 1:length(x$sw_score))
+rownames(x) = x$t
+
+
+x$strand = ifelse(x$matching_repeat == "+", "+", "-")
+
+
+files = sapply(s, function(el){
+  paste0("D:/Files/Molecular_data/chordoma_RNAseq/transp/LTR/", el, "/abundance.h5")
+})
+
+txi.LTR <- tximport(files, type = "kallisto", txOut = F, txIn = T, tx2gene = x[,c("t", "repeat_id")])
+
+wd = getwd()
+setwd(paste0(wd, "/dt"))
+
+save(txi.LTR, file = "txi.LTR.Rdata")
+
+x = txi.LTR$counts
+
+save(x, file = "LTR_counts.Rdata")
+
+```
+```{r}
+x = rbind(txi.LTR$counts, txi.LINE$counts)
+hist(rowSums(x))
+x = x/pmax(1, rowSums(x))
+x = x[,order(colSums(x))]
+```
+
+```{r}
+library(ComplexHeatmap)
+Heatmap(matrix = x, cluster_columns = F)
+```
+
+```{r}
+rownames(x)[grepl("L1", rownames(x))]
+```
+
+
+```{r}
+
+```
+
+
+```{r}
+cd = data.frame(source = ifelse(grepl("NP", colnames(txi.LINE$counts)), "NP", "Ch"),
+                sample = colnames(txi.LINE$counts))
+
+x = read.csv("spl_clust.csv")
+
+
+
+cd$methylation_cluster = x[match(cd$sample, gsub("/", "_", x$Sample_Name)),"type"]
+
+cd$methylation_cluster[cd$source == "NP"] = "nucleus_pulposus"
+
+cd$source[cd$sample %in% c("MUG_CC1", "UM_Chor1")] = "CL"
+
+cd$source = factor(as.character(cd$source), levels = c("NP", "Ch"))
+
+cd$methylation_cluster[cd$source == "CL"] = "cell_line"
+
+cd$idh = ifelse(cd$sample %in% c("16_20", "67_11"), "mut", "wt")
+cd$cdkn = ifelse(cd$sample %in% c("5_16", "31_20", "4_19", "24_18", "50_19", "53_18", "9_20", "20_17", "50_15"), "loh", "wt")
+cd$ly = ifelse(cd$sample %in% c("28_12", "81_15", "92_15", "32_14", "31_14", "26_15", "35_17", "28_20"), "high", "low")
+```
+
+```{r}
+dsLINE <- DESeqDataSetFromTximport(txi.LINE, cd, ~source)
+dsLINE <- dsLINE[rowSums(counts(dsLINE) > 4)>10,]
+
+dsLINE <- DESeq(dsLINE)
+resLINE <- results(dsLINE)
+resLINE = as.data.frame(resLINE)
+
+resLINE = resLINE[order(resLINE$pvalue),]
+
+resLINE
+
+dsLTR <- DESeqDataSetFromTximport(txi.LTR, cd, ~source)
+dsLTR <- dsLTR[rowSums(counts(dsLTR) > 4)>10,]
+
+dsLTR <- DESeq(dsLTR)
+resLTR <- results(dsLTR)
+resLTR = as.data.frame(resLTR)
+
+resLTR = resLTR[order(resLTR$pvalue),]
+
+resLTR
+```
+
+```{r}
+x = rbind(txi.LTR$counts, txi.LINE$counts)
+hist(rowSums(x))
+x = x/pmax(1, rowSums(x))
+x = x[,order(colSums(x))]
+```
+
+```{r}
+resLTR
+```
+```{r}
+table(ifelse(resLTR$stat[resLTR$padj<0.05]<0, "down", "up"))
+```
+```{r}
+table(ifelse(resLINE$stat[resLINE$padj<0.05]<0, "down", "up"))
+```
+
+
+
+```{r}
+for(what in c("LTR18B")){
+  
+  pl = list()
+  
+  x = rbind(txi.LTR$counts, txi.LINE$counts)
+  
+  df = cd
+  df$gene = x[what,df$sample]
+  df$methylation_cluster = factor(as.character(cd$methylation_cluster), levels = c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"))
+  
+  'stat.test <- tibble::tribble(
+    ~group1, ~group2,   ~p.adj,
+      "nucleus_pulposus",     "chordoma_2", res[what,"padj_2"],
+      "chordoma_1",     "chordoma_3", res[what,"padj_1v_3"],
+      "chordoma_1",     "chordoma_4", res[what,"padj_1v_4"],
+      "chordoma_3",     "chordoma_4", res[what,"padj_3v_4"],
+    )
+  
+  stat.test$siglev = ifelse(stat.test$p.adj>0.1, " ", ifelse(stat.test$p.adj>0.05, ".", ifelse(stat.test$p.adj>0.01, "*", ifelse(stat.test$p.adj>0.001, "**", "***"))))
+  stat.test$y = max(df$gene) + (max(df$gene) - min(df$gene))* (0.1 + c(0, cumsum(stat.test$p.adj[2:4]<=0.1)) /10)
+  stat.test = stat.test[!is.na(stat.test$p.adj),]
+  stat.test = stat.test[stat.test$p.adj<=0.1,]'
+  
+  library(ggpubr)
+  pl= ggboxplot(data = df, x = "methylation_cluster", y = "gene", add = "jitter", color = "methylation_cluster") + 
+    labs(title = what, y = "TEs counts", x = "Group") +
+    scale_y_continuous(limits = c(0, 1.02*max(df$gene)), expand = c(0,0))+
+    scale_color_manual(values = c(RColorBrewer::brewer.pal(12, "Paired")[c(2,6,8,4)], "black"), breaks = c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"), labels = gsub("_", " ", c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"))) + 
+    scale_x_discrete(breaks = c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"), labels = gsub("_", " ", c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"))) + theme(legend.position = "none")
+  
+   
+#  setwd(paste0(wd, "/res/degs"))
+#  ggsave(ggarrange(plotlist = pl, nrow = length(pl), ncol = 1), width = 7, height = 5*length(pl), dpi = 400, filename = paste0(what, ".png"), limitsize = F)
+}
+
+pl
+```
+```{r}
+pl = list()
+  x = rbind(txi.LTR$counts, txi.LINE$counts)
+
+  df = cd
+  df$gene = colSums(x)[cd$sample]
+  df$methylation_cluster = factor(as.character(cd$methylation_cluster), levels = c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"))
+  
+  'stat.test <- tibble::tribble(
+    ~group1, ~group2,   ~p.adj,
+      "nucleus_pulposus",     "chordoma_2", res[what,"padj_2"],
+      "chordoma_1",     "chordoma_3", res[what,"padj_1v_3"],
+      "chordoma_1",     "chordoma_4", res[what,"padj_1v_4"],
+      "chordoma_3",     "chordoma_4", res[what,"padj_3v_4"],
+    )
+  
+  stat.test$siglev = ifelse(stat.test$p.adj>0.1, " ", ifelse(stat.test$p.adj>0.05, ".", ifelse(stat.test$p.adj>0.01, "*", ifelse(stat.test$p.adj>0.001, "**", "***"))))
+  stat.test$y = max(df$gene) + (max(df$gene) - min(df$gene))* (0.1 + c(0, cumsum(stat.test$p.adj[2:4]<=0.1)) /10)
+  stat.test = stat.test[!is.na(stat.test$p.adj),]
+  stat.test = stat.test[stat.test$p.adj<=0.1,]'
+  
+  library(ggpubr)
+  pl[["all"]] = ggviolin (data = df, x = "methylation_cluster", y = "gene", add = c("boxplot", "jitter"), add.params = list(color = "black", fill = "white"), fill = "methylation_cluster") + 
+    labs(title = "Total TEs", y = "Sum of TE counts", x = "Group") +
+    scale_y_continuous(limits = c(0, 1.02*max(df$gene)), expand = c(0,0))+
+    scale_fill_manual(values = RColorBrewer::brewer.pal(12, "Paired")[c(2,6,8,4, 11)], breaks = c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"), labels = gsub("_", " ", c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"))) +
+    scale_x_discrete(breaks = c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"), labels = gsub("_", " ", c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus"))) + theme(legend.position = "none")
+  
+  pl
+  
+#  setwd(paste0(wd, "/res"))
+#  ggsave(filename = "TotalTEs.png", plot = pl, width = 7, height = 5, dpi = 400)
+```
+
+```{r}
+tec = assay(rlog(dsLINE, blind = T))
+tec = rbind(tec, assay(rlog(dsLTR, blind = T)))
+
+tec = (tec - rowMeans(tec[,!grepl("NP", colnames(tec))])) / apply(tec[,!grepl("NP", colnames(tec))], 1, sd)
+```
+
+```{r}
+tec = rbind(txi.LINE$counts, txi.LTR$counts)
+tec = tec/pmax(1, rowSums(tec[,!grepl("NP",colnames(tec))]))
+```
+
+
+
+```{r}
+cols = setNames(RColorBrewer::brewer.pal(12, "Paired")[c(2,4,6,8,10,11,12)], c(paste0("chordoma_", 1:4), "somatotropinoma", "nucleus_pulposus", "chordoma_cell_line"))
+
+df = data.frame(sample = colnames(tec))
+
+df$idh = ifelse(cd$idh[match(df$sample, cd$sample)] == "mut", "IDH1R132H", "normal")
+df$cdkn = ifelse(cd$cdkn[match(df$sample, cd$sample)] == "loh", "LOH", "normal")
+df$ly = ifelse(cd$ly[match(df$sample, cd$sample)] == "low", "low", "high")
+df$methylation_cluster = cd$methylation_cluster[match(df$sample, cd$sample)]
+df$rna_cluster = cd$rna_cluster[match(df$sample, cd$sample)]
+
+ha = HeatmapAnnotation(
+    #PDE4DIP = df$PDE4DIP,
+    #CRLF2 = df$CRLF2,
+    #MUC3A = df$MUC3A,
+    `IDH status` = df$idh,
+    `CDKN2A/B` = df$cdkn,
+    `Lymphocyte` = df$ly,
+    methylation_cluster = df$methylation_cluster,
+    #rna_cluster = df$rna_cluster,
+    col = list(`IDH status` = c("IDH1R132H" = "aquamarine4", "normal" = "white"),
+               `CDKN2A/B` = c("LOH" = "bisque4", "normal" = "white"),
+               `Lymphocyte` = c("low" = "white", "high" = "darkslateblue"),
+               methylation_cluster = cols,
+               rna_cluster = setNames(RColorBrewer::brewer.pal(5, "Set2"), c(paste0("chordoma_", toupper(letters[1:4])), "nucleus_pulposus")))
+)
+
+ht = Heatmap(tec,
+        show_row_names = F, show_row_dend = F,
+        column_split = factor(as.character(cd$methylation_cluster), levels = c(paste0("chordoma_", c(1,3,4,2)), "nucleus_pulposus")),
+        clustering_method_rows = "ward.D", clustering_distance_rows = "manhattan",
+        cluster_column_slices = F, #clustering_method_columns = "ward.D", clustering_distance_columns = "manhattan",
+        top_annotation = ha,
+        col = circlize::colorRamp2(quantile(tec[,!grepl("NP", colnames(tec))], probs = seq(0, 1, 1/10)), viridis::turbo(11)))
+
+png(filename = "ht_transp.png", width = 30, height = 20, units = "cm", res = 400)
+draw(ht, heatmap_legend_side = "left", annotation_legend_side = "bottom")
+dev.off()
+```
+
+```{r}
+TE[match(rownames(tec), TE$repeat_id),]
+```
+
+
+```{r}
+resTE = rbind(resLINE, resLTR)
+resTE = resTE[order(resTE$stat),]
+resTE
+```
+
+```{r}
+el = "LINE/L1"
+
+```
+
+
+```{r}
+te_fam = list()
+for(el in unique(TE$matching_class)){
+  if(!grepl("\\?", el)){
+    te_fam[[el]] = intersect(rownames(tec), unique(TE[gsub("\\?", "",TE$matching_class) == el,]$repeat_id))
+  }
+  
+}
+
+te_fam
+```
+
+```{r}
+grepl("?", el)
+```
+
+
+```{r}
+library(fgsea)
+
+Q = resTE$log2FoldChange
+names(Q) = rownames(resTE)
+fgseaRes <- fgsea(pathways = te_fam, stats = Q, eps = 1e-30, minSize  = 3, maxSize  = 1000)
+fgseaRes = as.data.frame(fgseaRes)[,c("pathway", "size", "pval", "padj", "ES", "NES")]
+fgseaRes = fgseaRes[order(fgseaRes$padj),]
+
+fgseaRes
+```
+
+
+
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.

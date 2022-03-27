@@ -1,0 +1,304 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+library(maftools)
+```
+
+```{r}
+chordoma = read.csv("maf_short.csv")
+
+colnames(chordoma) = c("Hugo_Symbol", "Entrez_Gene_Id", "Center", "NCBI_Build", "Chromosome", "Start_Position", "End_Position", "Strand", "Variant_Classification", "Variant_Type", "Reference_Allele", "Tumor_Seq_Allele1", "Tumor_Seq_Allele2", "Tumor_Sample_Barcode", "Protein_Change", "i_transcript_name")
+
+key = read.csv("key.csv")
+#key$tcga = unique(laml@clinical.data$Tumor_Sample_Barcode)[1:(dim(key)[1])]
+
+chordoma$Tumor_Sample_Barcode = key$met[match(as.numeric(gsub("STR", "", chordoma$Tumor_Sample_Barcode)), key$ï..maf)]
+```
+
+```{r}
+chordoma$NCBI_Build = 38
+```
+
+
+
+```{r}
+#chordoma = chordoma[chordoma$Chromosome %in% paste0("chr", 1:22),]
+#chordoma$Chromosome = as.numeric(gsub("chr", "", chordoma$Chromosome))
+chordoma = chordoma[!chordoma$Variant_Classification %in% c("Intron", "5'UTR", "3'UTR", "5'Flank", "3'Flank", "IGR", "Splice_Region"),]
+
+chordoma = chordoma[!chordoma$Hugo_Symbol %in% c("MUC3A", "PDE4DIP", "CRLF2"),]
+```
+
+```{r}
+chordoma$Variant_Classification = gsub("Splice_Region", "Nonstop_Mutation", chordoma$Variant_Classification)
+```
+
+
+```{r}
+x = HGNChelper::checkGeneSymbols(unique(chordoma$Hugo_Symbol))
+for(el in x[(!x$Approved) & is.na(x$Suggested.Symbol),"x"]){
+  chordoma = chordoma[!chordoma$Hugo_Symbol == el,]
+}
+```
+
+```{r}
+wd = getwd()
+setwd(gsub("MAF", "EPIC", paste0(wd, "/res")))
+spl = read.csv("spl_clust2.csv")
+```
+
+
+
+```{r}
+cd = data.frame(Tumor_Sample_Barcode = chordoma$Tumor_Sample_Barcode)
+cd = cbind(cd, spl[match(cd$Tumor_Sample_Barcode, spl$Sample_Name),])
+
+
+cd = cd[!duplicated(cd$Tumor_Sample_Barcode),c("Tumor_Sample_Barcode", "sex", "age", "ly", "type")]
+
+colnames(cd) = gsub("type", "methylation_cluster", colnames(cd))
+
+#cd$Methylation_Cluster[is.na(cd$Methylation_Cluster)] = "not_available"
+```
+
+
+
+```{r}
+chordoma = maftools::MAF(nonSyn = chordoma[!chordoma$Variant_Classification %in% "Silent",],
+                         syn = chordoma[chordoma$Variant_Classification %in% "Silent",],
+                         clinicalData = cd)
+```
+```{r}
+write.mafSummary(maf = chordoma, basename = "chordoma.maf")
+```
+
+```{r}
+chordoma = read.maf("chordoma.maf_maftools.maf",
+                    clinicalData = cd)
+```
+
+
+```{r}
+'png(filename = "laml_Summary.png", width = 18, height = 12, units = "cm", res = 400)
+plotmafSummary(maf = laml, rmOutlier = TRUE, addStat = "median", dashboard = TRUE, titvRaw = FALSE)
+dev.off()'
+```
+
+
+
+```{r}
+png(filename = "Summary.png", width = 18, height = 12, units = "cm", res = 400)
+plotmafSummary(maf = chordoma, rmOutlier = TRUE, addStat = 'median', dashboard = TRUE, titvRaw = FALSE)
+dev.off()
+```
+```{r}
+chordoma@clinical.data
+```
+
+
+
+
+
+
+
+
+```{r}
+cols = setNames(RColorBrewer::brewer.pal(12, "Paired")[c(2,4,6)], c(paste0("chordoma_", 1:3)))
+
+cols["not_available"] = "gray"
+
+png(filename = "Oncoplot.png", width = 24, height = 48, units = "cm", res = 400)
+oncoplot(maf = chordoma, minMut = 2, clinicalFeatures = c("methylation_cluster", "sex"), sortByAnnotation = T, annotationColor = list(methylation_cluster = cols, sex = c("male" = "lightskyblue", "female" = "lightpink")))
+dev.off()
+```
+```{r}
+met.ce = clinicalEnrichment(maf = chordoma, clinicalFeature = 'methylation_cluster', minMut = 1)
+
+met.ce
+```
+```{r}
+met.ce$groupwise_comparision[order(met.ce$groupwise_comparision$p_value),]
+```
+
+```{r}
+met.ce$groupwise_comparision[met.ce$groupwise_comparision$Hugo_Symbol == "IDH1",]
+
+
+x = as.data.frame(chordoma@data)
+x[x$Hugo_Symbol == "IDH1",]
+```
+```{r}
+setwd(gsub("MAF", "RNAseq", paste0(wd, "/dt")))
+library(fgsea)
+go = gmtPathways("c5.all.v7.4.entrez.gmt")
+
+length(go)
+go = go[!grepl("HP_", names(go))]
+length(go)
+```
+
+```{r}
+go = go[order(sapply(go, length))]
+go[1:5]
+```
+
+
+```{r}
+x = unique(dropNA(trl[match(chordoma@data$Hugo_Symbol, trl$hgnc_symbol),"entrezgene_id"]))
+
+go_mut = lapply(go, function(el){
+  el = intersect(el,x)
+  return(el)
+})
+
+go_mut = go_mut[sapply(go_mut, length)>1]
+
+go_mut = go_mut[!duplicated(go_mut)]
+
+go_mut = sapply(go_mut, function(el){
+  trl[match(el, trl$entrezgene_id),"hgnc_symbol"]
+})
+
+go_mut = go_mut[sapply(go_mut, function(el){
+  length(unique(chordoma@data[chordoma@data$Hugo_Symbol %in% el,]$Tumor_Sample_Barcode))
+}) > 3]
+
+length(go_mut)
+```
+```{r}
+spl$surv = Surv(time = spl$Days, event = ifelse(spl$Alive == "yes", 0,1))
+
+cox_go_mut = sapply(go_mut, function(el){
+
+  x = tapply(chordoma@data$Hugo_Symbol, chordoma@data$Tumor_Sample_Barcode, function(em){
+    sum(em %in% el)
+  })
+  
+  
+  
+  x = summary(coxph(surv~group,data=data.frame(sample = names(x), group = factor(ifelse(x>0, "yes", "no"), levels = c("no", "yes")), surv = spl$surv[match(names(x), spl$Sample_Name)])))
+  
+  x = c(x$coefficients["groupyes","coef"], x$logtest["pvalue"], x$sctest["pvalue"], x$waldtest["pvalue"])
+  
+  return(x)
+})
+```
+
+
+```{r}
+rownames(cox_go_mut) = c("estimate", "p_log", "p_sc", "p_wald")
+
+cox_go_mut = as.data.frame(flip(cox_go_mut))
+
+cox_go_mut = cox_go_mut[order(pmin(cox_go_mut$p_wald, cox_go_mut$p_sc, cox_go_mut$p_log)),]
+
+cox_go_mut
+```
+```{r}
+trl[match(go$GOMF_PEPTIDE_BINDING, trl$entrezgene_id),]
+```
+
+
+```{r}
+el = "GOMF_WNT_PROTEIN_BINDING"
+el = go_mut[[el]]
+
+x = tapply(chordoma@data$Hugo_Symbol, chordoma@data$Tumor_Sample_Barcode, function(em){
+    sum(em %in% el)
+  })
+  
+  data.frame(sample = names(x), group = factor(ifelse(x>0, "yes", "no"), levels = c("no", "yes")), surv = spl$surv[match(names(x), spl$Sample_Name)])
+  
+  #x = summary(coxph(surv~group,))
+```
+```{r}
+unique(chordoma@data$Hugo_Symbol[grepl("KDM", chordoma@data$Hugo_Symbol)])
+go_mut$GOBP_TUMOR_NECROSIS_FACTOR_SUPERFAMILY_CYTOKINE_PRODUCTION
+```
+
+
+
+```{r}
+cols = setNames(RColorBrewer::brewer.pal(12, "Paired")[c(2,4,6)], c(paste0("chordoma_", 1:3)))
+
+cols["not_available"] = "gray"
+
+png(filename = "Oncoplot_ordered.png", width = 24, height = 48, units = "cm", res = 400)
+oncoplot(maf = chordoma, genes = goi, keepGeneOrder = T, clinicalFeatures = c("methylation_cluster", "sex"), annotationColor = list(methylation_cluster = cols, sex = c("male" = "lightskyblue", "female" = "lightpink")))
+dev.off()
+```
+
+
+
+```{r}
+x = c(,,,)
+png(filename = "Lollipop_IDH1.png", width = 24, height = 12, units = "cm", res = 400)
+lollipopPlot(maf = chordoma,  gene = 'IDH1', showMutationRate = TRUE)
+dev.off()
+```
+
+```{r}
+png(filename = "Mutload.png", width = 24, height = 12, units = "cm", res = 400)
+laml.mutload = tcgaCompare(maf = chordoma, cohortName = 'Chordoma', logscale = TRUE, capture_size = 50)
+dev.off()
+```
+
+```{r}
+png(filename = "Corplot.png", width = 18, height = 18, units = "cm", res = 400)
+somaticInteractions(maf = chordoma, top = 25, pvalue = c(0.05, 0.1))
+dev.off()
+```
+
+```{r}
+chordoma.sig = oncodrive(maf = chordoma, AACol = 'Protein_Change', minMut = 1, pvalMethod = 'zscore')
+png(filename = "Driver.png", width = 18, height = 12, units = "cm", res = 400)
+plotOncodrive(res = chordoma.sig, fdrCutOff = 0.1, useFraction = TRUE, labelSize = 0.5)
+dev.off()
+chordoma.sig
+```
+```{r}
+chordoma.sig
+```
+
+
+
+```{r}
+png(filename = "Pathway.png", width = 12, height = 18, units = "cm", res = 400)
+OncogenicPathways(maf = chordoma)
+dev.off()
+```
+```{r}
+PlotOncogenicPathways(maf = chordoma, pathways = "RTK-RAS")
+```
+
+```{r}
+PlotOncogenicPathways(maf = chordoma, pathways = "NOTCH")
+```
+
+```{r}
+PlotOncogenicPathways(maf = chordoma, pathways = "WNT")
+```
+
+```{r}
+write.csv(chordoma@data, file = "mutations.csv")
+```
+
+```{r}
+mutations
+```
+
+
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
